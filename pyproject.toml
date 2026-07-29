@@ -22,8 +22,15 @@ classifiers = [
 Repository = "https://github.com/rebase-energy/OpenEUPHEMIA"
 
 [project.optional-dependencies]
+notebook = [
+    "matplotlib>=3.8",
+]
 dev = [
     "pytest>=8.0",
+    "matplotlib>=3.8",
+    "nbclient>=0.10",
+    "nbformat>=5.10",
+    "ipykernel>=6.29",
 ]
 
 [build-system]

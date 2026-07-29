@@ -5,9 +5,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from math import isfinite
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openeuphemia.core import DEMAND, SIDES, SUPPLY
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 _QUANTITY_TOLERANCE = 1e-9
 
@@ -146,6 +149,43 @@ class BidCurve:
         if side == DEMAND and not self._prices_non_increasing():
             raise ValueError("demand bid curve prices must be non-increasing")
 
+    @classmethod
+    def from_steps(
+        cls,
+        prices: Sequence[float],
+        quantities: Sequence[float],
+        *,
+        side: str,
+    ) -> BidCurve:
+        """Build a curve from per-step (price, quantity) pairs.
+
+        Steps are sorted into the monotone order the ``side`` requires —
+        ascending price for supply, descending for demand — quantities
+        offered at the same price are summed, and the result is
+        accumulated into cumulative volumes.
+        """
+
+        if side not in SIDES:
+            raise ValueError(f"side must be one of {sorted(SIDES)}, got {side!r}")
+        totals: dict[float, float] = {}
+        for price, quantity in zip(prices, quantities, strict=True):
+            totals[float(price)] = totals.get(float(price), 0.0) + float(quantity)
+        steps = sorted(
+            ((price, quantity) for price, quantity in totals.items() if quantity > _QUANTITY_TOLERANCE),
+            reverse=side == DEMAND,
+        )
+        if not steps:
+            raise ValueError("bid curve requires at least one non-empty step")
+        cumulative: list[float] = []
+        running = 0.0
+        for _price, quantity in steps:
+            running += quantity
+            cumulative.append(running)
+        return cls(
+            prices=[price for price, _quantity in steps],
+            cumulative_volumes=cumulative,
+        )
+
     def plot(self, ax: Any = None, *, side: str | None = None, **kwargs: Any) -> Any:
         """Plot the cumulative curve as a step function on ``ax``."""
 
@@ -162,3 +202,31 @@ class BidCurve:
         if side:
             ax.set_title(f"{side.capitalize()} curve")
         return ax
+
+
+def bid_curves_from_table(
+    curves: pd.DataFrame,
+) -> dict[tuple[int, str], dict[str, BidCurve]]:
+    """Build one :class:`BidCurve` per zone, period, and side from tidy rows.
+
+    ``curves`` needs the columns ``period``, ``zone``, ``side``,
+    ``price_eur_per_mwh``, and ``quantity_mwh``, one row per price step.
+    The result maps ``(period, zone)`` to a ``{"supply": ..., "demand": ...}``
+    mapping ready to pass straight to
+    :meth:`openeuphemia.core.Market.add_bid_curve`.
+    """
+
+    required = {"period", "zone", "side", "price_eur_per_mwh", "quantity_mwh"}
+    missing = sorted(required - set(curves.columns))
+    if missing:
+        raise ValueError(f"bid curve table is missing columns: {missing}")
+
+    result: dict[tuple[int, str], dict[str, BidCurve]] = {}
+    for (period, zone, side), group in curves.groupby(["period", "zone", "side"]):
+        key = (int(period), str(zone).upper())
+        result.setdefault(key, {})[str(side)] = BidCurve.from_steps(
+            group["price_eur_per_mwh"].tolist(),
+            group["quantity_mwh"].tolist(),
+            side=str(side),
+        )
+    return result

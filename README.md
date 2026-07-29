@@ -1,31 +1,28 @@
 # OpenEUPHEMIA
 
-**An open-source replication of EUPHEMIA, the European day-ahead electricity market-clearing algorithm — built only from public data.**
+**An open-source replication of EUPHEMIA, the European day-ahead electricity market-clearing algorithm — validated against published market results.**
 
-[EUPHEMIA](https://www.nemo-committee.eu/assets/files/euphemia-public-description.pdf) clears the Single Day-ahead Coupling (SDAC) spanning most of Europe: it maximizes economic welfare over all submitted orders subject to network constraints, and the resulting zonal prices settle billions of euros of energy every year. The algorithm is publicly described but its implementation is closed, and the full order books it clears are not public.
+[EUPHEMIA](https://www.nemo-committee.eu/sdac) clears the Single Day-ahead Coupling (SDAC) spanning most of Europe: it maximizes economic welfare over all submitted orders subject to network constraints, and the resulting zonal prices settle billions of euros of energy every year. The algorithm is publicly described but its implementation is closed.
 
-OpenEUPHEMIA's aim is a complete, verifiable open-source implementation for the full SDAC region. The approach is incremental and evidence-driven: each market region is added only once its published outcomes can be **reproduced exactly** from public data, so that everything in this repository is proven to work.
+OpenEUPHEMIA's aim is a complete, verifiable open-source implementation for the full SDAC region. The approach is incremental and evidence-driven: a market region is added only once its published outcomes can be **reproduced exactly**, so everything in this repository is proven to work.
 
-## Current milestone: Italy, exact price replication
+## Validation cases
 
-The first milestone replicates the published Italian day-ahead (MGP) zonal prices for **April 2025 — 5,040 of 5,040 zone-hours exact (MAE 0.0000 EUR/MWh, maximum absolute error 0.000 EUR/MWh)** — using nothing but public data published by [GME](https://www.mercatoelettrico.org):
+| Case | Period | Target | Result | Run it |
+|---|---|---|---|---|
+| **Italy** (GME MGP) | April 2025 | Zonal day-ahead prices | **5,040 / 5,040 zone-hours exact** — MAE 0.0000, max 0.000 EUR/MWh | [notebook](examples/italy_april_2025.ipynb) · [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/rebase-energy/OpenEUPHEMIA/blob/main/examples/italy_april_2025.ipynb) |
 
-| Input | GME publication |
-|---|---|
-| Full order book (every bid/offer with price, quantity, zone, acceptance status) | *Offerte pubbliche* (published with ~1 week delay) |
-| Transfer capacities between bidding zones and across external borders | *Limiti di transito* |
-| Published zonal prices (used for the boundary condition and for validation) | *MGP Prezzi* |
+Each case builds its market from published data only, clears it, and compares against the outcome the market operator published. Crucially, **no observed flows or tie-break rules are used**: scheduled exchanges are an *outcome* of the clearing, so feeding them back in would make the exercise circular.
 
-### How it works
+## How a case works
 
-Italy is cleared as a welfare-maximizing linear program per delivery period:
+A market is assembled from three tidy tables and cleared as a welfare-maximizing linear program per delivery period:
 
-1. **Aggregated zonal curves.** All simple hourly offers with a published ACC/REJ status are summed into one supply and one demand curve per (zone, period). Block orders (all-or-nothing across periods, introduced to the MGP in 2025) cannot live inside a convex curve; following EUPHEMIA's own price decomposition, their published decisions are fixed — accepted blocks enter as price-taking volumes, rejected blocks are dropped.
-2. **Internal network.** The seven Italian bidding zones (NORD, CNOR, CSUD, SUD, CALA, SICI, SARD) are connected by transfer capacities from the published *Limiti di transito*.
-3. **Price-taking boundaries.** Every external border (France, Switzerland, Austria, Slovenia, Greece, Montenegro, Corsica, …) is modelled as a price-taker at the neighbouring zone's published price, free to exchange anywhere within the published border capacities — a Dirichlet boundary condition. **No observed flows, scheduled exchanges, or tie-break rules are used anywhere.**
-4. **Prices from duals.** Zonal prices are the dual values of the zonal balance constraints, solved with [HiGHS](https://highs.dev).
+1. **Bid curves** — every submitted bid and offer, aggregated into one supply and one demand curve per zone and period.
+2. **Transfer capacities** — the published limit of each link between zones.
+3. **Boundary conditions** — each border with the un-modelled world becomes a *price taker* at the neighbouring zone's published price, bounded by the published border capacity (a Dirichlet boundary condition). The border prices turn out to be a sufficient statistic for the rest of Europe.
 
-That this closure reproduces every published price exactly is the point: given the published order book and capacities, the welfare-maximization problem has a unique price solution that matches GME's, and the border prices alone are a sufficient statistic for the rest of Europe.
+Zonal prices are then the dual values of the zonal balance constraints, solved with [HiGHS](https://highs.dev) — exactly how EUPHEMIA defines them.
 
 ## Installation
 
@@ -37,53 +34,11 @@ cd OpenEUPHEMIA
 pip install -e .
 ```
 
-or with [uv](https://docs.astral.sh/uv/):
+or with [uv](https://docs.astral.sh/uv/): `uv sync`.
 
-```bash
-uv sync
-```
+## Building a market
 
-## Usage
-
-Replicate a day (or a range) — all inputs are downloaded from GME on first use and cached under `data/gme`:
-
-```bash
-python scripts/replicate_italy_prices.py 2025-04-01
-python scripts/replicate_italy_prices.py 2025-04-01 2025-04-30
-```
-
-Expected output, for every single day of April 2025:
-
-```
-2025-04-01  MAE 0.0000  max 0.000  exact 168/168  dropped-borders 0
-...
-TOTAL  MAE 0.0000  max 0.000  exact 5040/5040
-```
-
-Or from Python, in one call:
-
-```python
-from openeuphemia.italy.data import (
-    load_or_fetch_offers,
-    load_or_fetch_capacity_bounds,
-    load_or_fetch_prices,
-)
-from openeuphemia.italy.replication import replicate_italy_day
-
-day = "2025-04-01"
-result = replicate_italy_day(
-    delivery_day=day,
-    offers=load_or_fetch_offers(day),
-    capacity_bounds=load_or_fetch_capacity_bounds(day),
-    reference_prices=load_or_fetch_prices(day),
-)
-print(result.summary)
-result.price_comparison  # one row per (period, zone) with modelled vs published price
-```
-
-### Building a market
-
-A market is assembled incrementally — zones and interconnectors, aggregated bid curves, transfer capacities, boundary conditions — and then cleared:
+Markets are built incrementally — zones and interconnectors, bid curves, transfer capacities, boundary conditions — then cleared:
 
 ```python
 from openeuphemia import BidCurve, Market, System
@@ -98,7 +53,7 @@ market.add_bid_curve(
     demand=BidCurve(prices=[4000.0, 30.0], cumulative_volumes=[40.0, 120.0]),
 )
 market.set_ntc("NORD", "SUD", capacity_mwh=500.0)
-market.add_fixed_price_boundary(       # a price-taking neighbour
+market.add_fixed_price_boundary(          # a price-taking neighbour
     id="NORD_FRAN", period=1, zone="NORD", external_zone="FRAN",
     price_eur_per_mwh=60.0, import_capacity_mwh=1000.0, export_capacity_mwh=1000.0,
 )
@@ -107,16 +62,33 @@ result = market.clear(method="per-period-lp")
 result.prices
 ```
 
-Boundaries come in both flavours: `add_fixed_price_boundary` for a price-taking neighbour (used here for Italy) and `add_fixed_flow_boundary` to pin an exchange at a known volume.
+Boundaries come in both flavours: `add_fixed_price_boundary` for a price-taking neighbour and `add_fixed_flow_boundary` to pin an exchange at a known volume. `BidCurve.from_steps` builds a curve from unsorted (price, quantity) pairs, and `bid_curves_from_table` builds a whole market's worth from a dataframe.
 
-[`examples/replicate_one_day.py`](examples/replicate_one_day.py) applies exactly these steps to real GME data and reproduces one full day of published prices.
+The [Italy notebook](examples/italy_april_2025.ipynb) applies exactly these steps to real data and reproduces a full month of published prices.
 
-> **Note.** GME publishes the order book with roughly one week of delay, so the most recent days cannot be replicated until their *offerte pubbliche* appear.
+## Reproducing the Italy case
+
+The validation inputs are committed under [`data/italy`](data/italy), so everything runs offline:
+
+```bash
+python scripts/replicate_italy_prices.py            # all 30 days of April 2025
+python scripts/replicate_italy_prices.py --day 2025-04-01
+```
+
+```
+2025-04-01  MAE 0.0000  max 0.000  exact 168/168  dropped-borders 0
+...
+TOTAL  MAE 0.0000  max 0.000  exact 5040/5040
+```
+
+## Scope
+
+This library is about **building, closing, and clearing markets** — not about collecting data. Each case's inputs are prepared once from the market operator's public publications and committed as tidy tables; [`data/italy/README.md`](data/italy/README.md) documents exactly what they are and how they were derived (including how non-convex block orders are handled).
 
 ## Roadmap
 
-- **Italy** — exact zonal price replication (this milestone). Next: cleared volumes and scheduled flows.
-- **Nordics / MIBEL / CWE** — extend the same aggregated-curve + boundary-condition methodology, region by region, each gated on exact replication of published outcomes.
+- **Italy** — exact zonal price replication ✅. Next: cleared volumes and scheduled flows, which are harder because equal prices leave the flow split genuinely indeterminate.
+- **Nordics / MIBEL / CWE** — extend the same curve + boundary-condition methodology, region by region, each gated on exact replication of published outcomes.
 - **Full SDAC** — one coupled clearing of all regions, closing the boundary conditions internally.
 
 ## Tests

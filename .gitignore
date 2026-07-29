@@ -1,5 +1,5 @@
-# Local data cache (downloaded from GME on demand)
-data/
+# Local working caches (raw downloads live outside the library)
+data/gme/
 
 # Python
 __pycache__/
@@ -10,6 +10,7 @@ build/
 .venv/
 .pytest_cache/
 .ruff_cache/
+.ipynb_checkpoints/
 
 # OS / editor
 .DS_Store

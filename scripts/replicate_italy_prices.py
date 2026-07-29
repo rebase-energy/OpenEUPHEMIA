@@ -1,14 +1,14 @@
-"""Replicate published Italian day-ahead zonal prices for a range of days.
+"""Replicate the published Italian day-ahead zonal prices for a committed month.
 
-Downloads all required public GME data (order book, transfer-capacity
-limits, published prices) on first use and caches it under ``data/gme``.
+Reads the validation inputs committed under ``data/italy`` and clears
+every delivery day they contain.
 
 Examples::
 
-    python scripts/replicate_italy_prices.py 2025-04-01
-    python scripts/replicate_italy_prices.py 2025-04-01 2025-04-30
-    python scripts/replicate_italy_prices.py 2025-04-01 2025-04-30 \
-        --output-csv april-2025-price-comparison.csv
+    python scripts/replicate_italy_prices.py
+    python scripts/replicate_italy_prices.py --month 2025-04
+    python scripts/replicate_italy_prices.py --day 2025-04-01
+    python scripts/replicate_italy_prices.py --output-csv price-comparison.csv
 """
 
 from __future__ import annotations
@@ -21,50 +21,36 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from openeuphemia.italy.data import (
-    DEFAULT_CACHE_ROOT,
-    iter_days,
-    load_or_fetch_capacity_bounds,
-    load_or_fetch_offers,
-    load_or_fetch_prices,
-)
-from openeuphemia.italy.replication import (
+from openeuphemia.italy import (
+    delivery_days,
     replicate_italy_day,
     summarize_price_comparison,
 )
 
+DATA_ROOT = Path(__file__).resolve().parents[1] / "data" / "italy"
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("start_day", help="first delivery day (YYYY-MM-DD)")
-    parser.add_argument(
-        "end_day",
-        nargs="?",
-        help="last delivery day (default: same as start_day)",
-    )
-    parser.add_argument(
-        "--cache-root",
-        default=str(DEFAULT_CACHE_ROOT),
-        help="local cache directory for downloaded GME data",
-    )
-    parser.add_argument(
-        "--output-csv",
-        default=None,
-        help="write the per-(period, zone) price comparison to this CSV",
-    )
+    parser.add_argument("--month", default="2025-04", help="committed month to replicate")
+    parser.add_argument("--day", default=None, help="replicate a single delivery day")
+    parser.add_argument("--data-root", default=str(DATA_ROOT))
+    parser.add_argument("--output-csv", default=None)
     args = parser.parse_args()
 
-    end_day = args.end_day or args.start_day
+    root = Path(args.data_root) / args.month
+    bid_curves = pd.read_csv(root / "bid-curves.csv.gz")
+    transfer_capacities = pd.read_csv(root / "transfer-capacities.csv.gz")
+    published_prices = pd.read_csv(root / "published-prices.csv.gz")
+
+    days = [args.day] if args.day else delivery_days(bid_curves)
     comparisons: list[pd.DataFrame] = []
-    for day in iter_days(args.start_day, end_day):
-        offers = load_or_fetch_offers(day, cache_root=args.cache_root)
-        bounds = load_or_fetch_capacity_bounds(day, cache_root=args.cache_root)
-        prices = load_or_fetch_prices(day, cache_root=args.cache_root)
+    for day in days:
         result = replicate_italy_day(
             delivery_day=day,
-            offers=offers,
-            capacity_bounds=bounds,
-            reference_prices=prices,
+            bid_curves=bid_curves,
+            transfer_capacities=transfer_capacities,
+            published_prices=published_prices,
         )
         summary = result.summary
         comparisons.append(result.price_comparison)
