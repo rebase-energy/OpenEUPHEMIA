@@ -60,7 +60,7 @@ Expected output, for every single day of April 2025:
 TOTAL  MAE 0.0000  max 0.000  exact 5040/5040
 ```
 
-Or from Python:
+Or from Python — [`examples/replicate_one_day.py`](examples/replicate_one_day.py) is a minimal end-to-end example:
 
 ```python
 from openeuphemia.italy.data import (
