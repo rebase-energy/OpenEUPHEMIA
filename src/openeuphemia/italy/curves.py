@@ -21,6 +21,7 @@ from typing import Sequence
 
 import pandas as pd
 
+from openeuphemia.curves import BidCurve
 from openeuphemia.gme.offers import PUBLIC_CURVE_STATUS_CODES, SIDE_BY_PURPOSE
 
 ITALY_PRICE_AREAS = ("NORD", "CNOR", "CSUD", "SUD", "CALA", "SICI", "SARD")
@@ -70,6 +71,66 @@ def zonal_curves_from_offers(
     if not block_fixings.empty:
         curves = pd.concat([curves, block_fixings], ignore_index=True)
     return curves, int(len(block_fixings))
+
+
+def bid_curves_from_offers(
+    offers: pd.DataFrame,
+    *,
+    delivery_day: str,
+    zones: Sequence[str] = ITALY_PRICE_AREAS,
+) -> tuple[dict[tuple[int, str], dict[str, BidCurve]], int]:
+    """Build one supply and one demand :class:`BidCurve` per zone and period.
+
+    Returns ``(curves, block_fixing_rows)``, where ``curves`` maps
+    ``(period, zone)`` to a ``{"supply": ..., "demand": ...}`` mapping ready
+    to pass straight to :meth:`openeuphemia.core.Market.add_bid_curve`.
+    """
+
+    curve_rows, block_fixing_rows = zonal_curves_from_offers(
+        offers,
+        delivery_day=delivery_day,
+        zones=zones,
+    )
+    return bid_curves_from_zonal_curves(curve_rows), block_fixing_rows
+
+
+def bid_curves_from_zonal_curves(
+    curves: pd.DataFrame,
+) -> dict[tuple[int, str], dict[str, BidCurve]]:
+    """Convert aggregated (price, quantity) curve rows to cumulative bid curves.
+
+    Supply curves are ordered by ascending price and demand curves by
+    descending price — the monotonicity a cumulative bid curve requires.
+    Quantities offered at the same price are summed, which merges the
+    price-taking rows of accepted block orders into the curve they belong to.
+    """
+
+    if curves.empty:
+        return {}
+    frame = curves.copy()
+    frame["period"] = frame["period"].astype(int)
+    frame["zone"] = frame["zone"].astype(str).str.upper()
+    frame = (
+        frame.groupby(["period", "zone", "side", "price_eur_per_mwh"], dropna=False)[
+            "quantity_mwh"
+        ]
+        .sum()
+        .reset_index()
+    )
+    frame = frame[frame["quantity_mwh"] > TOLERANCE]
+
+    result: dict[tuple[int, str], dict[str, BidCurve]] = {}
+    for (period, zone, side), group in frame.groupby(["period", "zone", "side"]):
+        ordered = group.sort_values(
+            "price_eur_per_mwh",
+            ascending=side != "demand",
+            kind="stable",
+        )
+        result.setdefault((int(period), str(zone)), {})[str(side)] = BidCurve(
+            prices=ordered["price_eur_per_mwh"].tolist(),
+            cumulative_volumes=ordered["quantity_mwh"].cumsum().tolist(),
+        )
+    return result
 
 
 def filtered_public_offer_rows(

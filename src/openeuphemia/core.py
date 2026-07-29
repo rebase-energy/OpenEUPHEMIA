@@ -256,8 +256,13 @@ class Market:
             )
             existing_ids.update(row["id"] for row in side_rows)
             rows.extend(side_rows)
-        for row in rows:
-            self.orders = _append_row(self.orders, row)
+        if rows:
+            rows_frame = pd.DataFrame(rows)
+            self.orders = (
+                rows_frame
+                if self.orders.empty
+                else pd.concat([self.orders, rows_frame], ignore_index=True)
+            )
 
     def add_block_order(
         self,

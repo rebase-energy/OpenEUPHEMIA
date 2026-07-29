@@ -3,8 +3,10 @@
 import pandas as pd
 
 from openeuphemia.italy.replication import (
+    build_italy_market,
     external_boundary_prices_from_bounds,
     external_capacity_bounds_from_all_bounds,
+    internal_transfer_capacities,
     replicate_italy_day,
 )
 
@@ -83,6 +85,42 @@ def test_replicates_published_prices_exactly():
     assert result.summary["price_mae_eur_per_mwh"] == 0.0
     assert result.summary["dropped_unpriced_borders"] == 0
     assert (result.boundary_diagnostics["treatment"] == "open").all()
+
+
+def test_market_is_built_from_a_system_with_bid_curves_and_boundaries():
+    offers, bounds, prices = synthetic_inputs()
+    built = build_italy_market(
+        delivery_day=DAY,
+        offers=offers,
+        capacity_bounds=bounds,
+        reference_prices=prices,
+        zones=("NORD", "SUD"),
+    )
+    market = built.market
+    assert market.system is not None
+    assert market.system.has_interconnector("NORD", "SUD")
+    # The one external border became a price-taking boundary, not a link.
+    assert list(market.boundary_prices["external_zone"]) == ["XFRA"]
+    assert market.boundary_flows.empty
+    market.validate()
+    link = market.interconnectors.iloc[0]
+    assert (link["min_flow_mwh"], link["max_flow_mwh"]) == (-20.0, 20.0)
+
+
+def test_internal_transfer_capacities_are_non_negative_and_directional():
+    _, bounds, _ = synthetic_inputs()
+    asymmetric = bounds.copy()
+    asymmetric.loc[0, ["min_flow_mwh", "max_flow_mwh"]] = [-5.0, 20.0]
+    capacities = internal_transfer_capacities(
+        asymmetric,
+        delivery_day=DAY,
+        zones=("NORD", "SUD"),
+    )
+    row = capacities.iloc[0]
+    assert row["from_zone"] == "NORD"
+    assert row["to_zone"] == "SUD"
+    assert row["forward_capacity_mwh"] == 20.0
+    assert row["reverse_capacity_mwh"] == 5.0
 
 
 def test_external_bounds_are_oriented_export_positive():

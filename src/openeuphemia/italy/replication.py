@@ -28,14 +28,19 @@ import pandas as pd
 
 from openeuphemia.core import Market, MarketClearingResult
 from openeuphemia.gme.prices import mgp_price_mapping
-from openeuphemia.italy.curves import (
-    ITALY_PRICE_AREAS,
-    orders_from_zonal_curves,
-    zonal_curves_from_offers,
-)
-from openeuphemia.solver.per_period import clear_market_per_period
+from openeuphemia.italy.curves import ITALY_PRICE_AREAS, bid_curves_from_offers
+from openeuphemia.system import System
 
 PRICE_TOLERANCE_EUR = 0.005
+
+
+@dataclass(frozen=True)
+class ItalyMarket:
+    """An Italian delivery day built into a clearable :class:`Market`."""
+
+    market: Market
+    boundary_diagnostics: pd.DataFrame
+    block_fixing_rows: int
 
 
 @dataclass(frozen=True)
@@ -50,16 +55,15 @@ class ItalyReplicationResult:
     summary: dict[str, Any]
 
 
-def replicate_italy_day(
+def build_italy_market(
     *,
     delivery_day: str | date,
     offers: pd.DataFrame,
     capacity_bounds: pd.DataFrame,
     reference_prices: pd.DataFrame,
     zones: Sequence[str] = ITALY_PRICE_AREAS,
-    solver: str = "auto",
-) -> ItalyReplicationResult:
-    """Clear one delivery day from public GME inputs and compare prices.
+) -> ItalyMarket:
+    """Assemble one Italian delivery day into a clearable :class:`Market`.
 
     ``offers`` is the processed public order book
     (:func:`openeuphemia.gme.offers.parse_mgp_offers_zip`),
@@ -68,30 +72,27 @@ def replicate_italy_day(
     and ``reference_prices`` the published MGP prices
     (:func:`openeuphemia.gme.prices.parse_mgp_price_zip`) covering both
     the Italian zones and the external border zones.
+
+    The market is built through the same incremental API a user would call
+    by hand: a :class:`~openeuphemia.system.System` of zones and
+    interconnectors, ``add_bid_curve`` per zone and period, ``set_ntc`` for
+    the internal transfer capacities, and ``add_fixed_price_boundary`` for
+    every external border.
     """
 
     day = date.fromisoformat(str(delivery_day)).isoformat()
     zone_list = tuple(str(zone).upper() for zone in zones)
 
-    curves, block_fixing_rows = zonal_curves_from_offers(
+    bid_curves, block_fixing_rows = bid_curves_from_offers(
         offers,
         delivery_day=day,
         zones=zone_list,
     )
-    orders = orders_from_zonal_curves(curves)
-    if orders.empty:
+    if not bid_curves:
         raise ValueError(f"no public offer rows found for {day}")
-    periods = sorted(int(value) for value in orders["period"].unique())
+    periods = sorted({period for period, _zone in bid_curves})
 
-    reference_map = mgp_price_mapping(reference_prices, delivery_day=day)
-    internal_reference = {
-        key: value for key, value in reference_map.items() if key[1] in zone_list
-    }
-    boundary_reference = {
-        key: value for key, value in reference_map.items() if key[1] not in zone_list
-    }
-
-    interconnectors = internal_interconnectors_from_capacity_bounds(
+    capacities = internal_transfer_capacities(
         capacity_bounds,
         delivery_day=day,
         zones=zone_list,
@@ -103,19 +104,30 @@ def replicate_italy_day(
         zones=zone_list,
         periods=periods,
     )
+    boundary_reference = {
+        key: value
+        for key, value in mgp_price_mapping(reference_prices, delivery_day=day).items()
+        if key[1] not in zone_list
+    }
     boundary_prices, boundary_diagnostics = external_boundary_prices_from_bounds(
         external_bounds,
         boundary_reference,
     )
 
+    system = System(
+        zones=list(zone_list),
+        interconnectors=sorted(
+            {
+                (str(row.from_zone), str(row.to_zone))
+                for row in capacities.itertuples(index=False)
+            }
+        ),
+    )
     market = Market(
         name=f"italy-price-replication-{day}",
         delivery_day=day,
-        zones=list(zone_list),
+        system=system,
         periods=periods,
-        orders=orders,
-        interconnectors=interconnectors,
-        boundary_prices=boundary_prices,
         metadata={
             "scenario": "italy-price-replication",
             "boundary_condition": "price-taking-published-border-prices",
@@ -123,23 +135,77 @@ def replicate_italy_day(
             "block_fixing_rows": block_fixing_rows,
         },
     )
-    clearing = clear_market_per_period(market, solver=solver)
+    for (period, zone), sides in sorted(bid_curves.items()):
+        market.add_bid_curve(zone=zone, period=period, **sides)
+    for row in capacities.itertuples(index=False):
+        market.set_ntc(
+            str(row.from_zone),
+            str(row.to_zone),
+            period=int(row.period),
+            forward_capacity_mwh=float(row.forward_capacity_mwh),
+            reverse_capacity_mwh=float(row.reverse_capacity_mwh),
+        )
+    for row in boundary_prices.itertuples(index=False):
+        market.add_fixed_price_boundary(
+            id=str(row.id),
+            period=int(row.period),
+            zone=str(row.zone),
+            external_zone=str(row.external_zone),
+            price_eur_per_mwh=float(row.price_eur_per_mwh),
+            import_capacity_mwh=float(row.import_capacity_mwh),
+            export_capacity_mwh=float(row.export_capacity_mwh),
+        )
+    return ItalyMarket(
+        market=market,
+        boundary_diagnostics=boundary_diagnostics,
+        block_fixing_rows=block_fixing_rows,
+    )
+
+
+def replicate_italy_day(
+    *,
+    delivery_day: str | date,
+    offers: pd.DataFrame,
+    capacity_bounds: pd.DataFrame,
+    reference_prices: pd.DataFrame,
+    zones: Sequence[str] = ITALY_PRICE_AREAS,
+    solver: str = "auto",
+) -> ItalyReplicationResult:
+    """Build, clear, and validate one delivery day against the published prices."""
+
+    day = date.fromisoformat(str(delivery_day)).isoformat()
+    zone_list = tuple(str(zone).upper() for zone in zones)
+    built = build_italy_market(
+        delivery_day=day,
+        offers=offers,
+        capacity_bounds=capacity_bounds,
+        reference_prices=reference_prices,
+        zones=zone_list,
+    )
+    market = built.market
+    clearing = market.clear(solver=solver, method="per-period-lp")
+
+    internal_reference = {
+        key: value
+        for key, value in mgp_price_mapping(reference_prices, delivery_day=day).items()
+        if key[1] in zone_list
+    }
     price_comparison = compare_prices(
         clearing.prices,
         internal_reference,
         delivery_day=day,
     )
-    dropped = boundary_diagnostics[
-        boundary_diagnostics["treatment"] == "unpriced-dropped"
+    dropped = built.boundary_diagnostics[
+        built.boundary_diagnostics["treatment"] == "unpriced-dropped"
     ]
     summary = {
         "delivery_day": day,
         "zones": list(zone_list),
-        "periods": len(periods),
-        "orders": int(len(orders)),
-        "block_fixing_rows": int(block_fixing_rows),
-        "interconnectors": int(len(interconnectors)),
-        "boundary_price_rows": int(len(boundary_prices)),
+        "periods": int(len(market.periods)),
+        "orders": int(len(market.orders)),
+        "block_fixing_rows": int(built.block_fixing_rows),
+        "interconnectors": int(len(market.interconnectors)),
+        "boundary_price_rows": int(len(market.boundary_prices)),
         "dropped_unpriced_borders": int(len(dropped)),
         "objective_value": float(clearing.objective_value),
         **summarize_price_comparison(price_comparison),
@@ -149,9 +215,50 @@ def replicate_italy_day(
         market=market,
         clearing=clearing,
         price_comparison=price_comparison,
-        boundary_diagnostics=boundary_diagnostics,
+        boundary_diagnostics=built.boundary_diagnostics,
         summary=summary,
     )
+
+
+def internal_transfer_capacities(
+    capacity_bounds: pd.DataFrame,
+    *,
+    delivery_day: str,
+    zones: Sequence[str],
+    periods: Sequence[int] | None = None,
+) -> pd.DataFrame:
+    """Directional transfer capacities between internal zones, ready for ``set_ntc``.
+
+    ``forward_capacity_mwh`` limits flow from ``from_zone`` to ``to_zone``
+    and ``reverse_capacity_mwh`` the opposite direction; both are
+    non-negative.
+    """
+
+    bounds = internal_interconnectors_from_capacity_bounds(
+        capacity_bounds,
+        delivery_day=delivery_day,
+        zones=zones,
+        periods=periods,
+    )
+    if bounds.empty:
+        return pd.DataFrame(
+            columns=[
+                "period",
+                "from_zone",
+                "to_zone",
+                "forward_capacity_mwh",
+                "reverse_capacity_mwh",
+            ]
+        )
+    return pd.DataFrame(
+        {
+            "period": bounds["period"].astype(int),
+            "from_zone": bounds["from_zone"],
+            "to_zone": bounds["to_zone"],
+            "forward_capacity_mwh": bounds["max_flow_mwh"].astype(float),
+            "reverse_capacity_mwh": -bounds["min_flow_mwh"].astype(float),
+        }
+    ).reset_index(drop=True)
 
 
 def internal_interconnectors_from_capacity_bounds(

@@ -8,7 +8,15 @@ day-ahead zonal prices exactly from public GME data alone.
 from __future__ import annotations
 
 from openeuphemia.core import Market, MarketClearingResult
+from openeuphemia.curves import BidCurve
+from openeuphemia.system import System
 
 __version__ = "0.1.0"
 
-__all__ = ["Market", "MarketClearingResult", "__version__"]
+__all__ = [
+    "BidCurve",
+    "Market",
+    "MarketClearingResult",
+    "System",
+    "__version__",
+]

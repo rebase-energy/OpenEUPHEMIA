@@ -60,7 +60,7 @@ Expected output, for every single day of April 2025:
 TOTAL  MAE 0.0000  max 0.000  exact 5040/5040
 ```
 
-Or from Python — [`examples/replicate_one_day.py`](examples/replicate_one_day.py) is a minimal end-to-end example:
+Or from Python, in one call:
 
 ```python
 from openeuphemia.italy.data import (
@@ -81,7 +81,35 @@ print(result.summary)
 result.price_comparison  # one row per (period, zone) with modelled vs published price
 ```
 
-The general-purpose clearing model is exposed as `openeuphemia.core.Market`: component tables of orders, interconnectors, and boundary conditions, cleared via `market.clear(method="per-period-lp")`.
+### Building a market
+
+A market is assembled incrementally — zones and interconnectors, aggregated bid curves, transfer capacities, boundary conditions — and then cleared:
+
+```python
+from openeuphemia import BidCurve, Market, System
+
+system = System(zones=["NORD", "SUD"], interconnectors=[("NORD", "SUD")])
+market = Market(name="example", delivery_day="2025-04-01", system=system, periods=[1])
+
+market.add_bid_curve(
+    zone="NORD",
+    period=1,
+    supply=BidCurve(prices=[10.0, 80.0], cumulative_volumes=[100.0, 200.0]),
+    demand=BidCurve(prices=[4000.0, 30.0], cumulative_volumes=[40.0, 120.0]),
+)
+market.set_ntc("NORD", "SUD", capacity_mwh=500.0)
+market.add_fixed_price_boundary(       # a price-taking neighbour
+    id="NORD_FRAN", period=1, zone="NORD", external_zone="FRAN",
+    price_eur_per_mwh=60.0, import_capacity_mwh=1000.0, export_capacity_mwh=1000.0,
+)
+
+result = market.clear(method="per-period-lp")
+result.prices
+```
+
+Boundaries come in both flavours: `add_fixed_price_boundary` for a price-taking neighbour (used here for Italy) and `add_fixed_flow_boundary` to pin an exchange at a known volume.
+
+[`examples/replicate_one_day.py`](examples/replicate_one_day.py) applies exactly these steps to real GME data and reproduces one full day of published prices.
 
 > **Note.** GME publishes the order book with roughly one week of delay, so the most recent days cannot be replicated until their *offerte pubbliche* appear.
 
