@@ -1,0 +1,37 @@
+[project]
+name = "openeuphemia"
+version = "0.1.0"
+description = "Open-source replication of EUPHEMIA day-ahead market clearing from public data"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "rebase.energy" }]
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=2.0",
+    "highspy>=1.7",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.urls]
+Repository = "https://github.com/rebase-energy/OpenEUPHEMIA"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openeuphemia"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
