@@ -398,7 +398,7 @@ class PowerMarket:
                     },
                 )
 
-    def add_flow_boundary(
+    def add_fixed_flow_boundary(
         self,
         *,
         id: str,
@@ -424,7 +424,7 @@ class PowerMarket:
             },
         )
 
-    def add_price_boundary(
+    def add_fixed_price_boundary(
         self,
         *,
         id: str,

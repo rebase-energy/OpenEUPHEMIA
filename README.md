@@ -77,7 +77,7 @@ market.add_bid_curve(
     demand=BidCurve([(40.0, 4000.0), (120.0, 30.0)]),
 )
 market.set_ntc("NORD", "SUD", capacity_mwh=500.0)
-market.add_price_boundary(                # a price-taking neighbour
+market.add_fixed_price_boundary(                # a price-taking neighbour
     id="NORD_FRAN", period=1, zone="NORD", external_zone="FRAN",
     price_eur_per_mwh=60.0, import_capacity_mwh=1000.0, export_capacity_mwh=1000.0,
 )
@@ -88,7 +88,7 @@ result.prices
 
 `BidCurve`'s default constructor takes a list of `(volume, price)` pairs; passing `prices`/`cumulative_volumes` as two separate sequences also works, for callers that already have the curve in that shape. `BidCurve.from_steps` builds one from unsorted per-step `(price, quantity)` data, and `bid_curves_from_table` builds a whole market's worth from a dataframe.
 
-Boundary conditions are two separate methods, since they take different arguments: `add_price_boundary` for a price-taking neighbour (Dirichlet — free to trade within a capacity, at a fixed price) and `add_flow_boundary` to pin an exchange at a known volume (Neumann).
+Boundary conditions are two separate methods, since they take different arguments: `add_fixed_price_boundary` for a price-taking neighbour (Dirichlet — free to trade within a capacity, at a fixed price) and `add_fixed_flow_boundary` to pin an exchange at a known volume (Neumann).
 
 To resolve which of the welfare-equal flow patterns is returned, pass a selection rule — the prices are read before it applies and stay untouched:
 

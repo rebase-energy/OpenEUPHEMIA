@@ -69,13 +69,13 @@ def test_add_bid_curve_rejects_a_zone_outside_the_declared_zones():
         market.add_bid_curve(zone="Z", period=1, supply=BidCurve([(10.0, 5.0)]))
 
 
-def test_price_and_flow_boundaries_use_the_renamed_methods():
+def test_price_and_flow_boundaries_are_separate_methods():
     market = PowerMarket(name="m", delivery_day="2025-04-01", zones=["A"], periods=[1])
-    market.add_price_boundary(
+    market.add_fixed_price_boundary(
         id="ext_a", period=1, zone="A", price_eur_per_mwh=30.0,
         import_capacity_mwh=100.0, export_capacity_mwh=100.0,
     )
-    market.add_flow_boundary(id="fixed_a", period=1, zone="A", quantity_mwh=10.0)
+    market.add_fixed_flow_boundary(id="fixed_a", period=1, zone="A", quantity_mwh=10.0)
     assert list(market.boundary_prices["price_eur_per_mwh"]) == [30.0]
     assert list(market.boundary_flows["quantity_mwh"]) == [10.0]
 

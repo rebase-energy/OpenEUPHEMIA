@@ -153,7 +153,7 @@ def build_italy_market(
         )
     if boundary == "prices":
         for row in boundary_prices.itertuples(index=False):
-            market.add_price_boundary(
+            market.add_fixed_price_boundary(
                 id=str(row.id),
                 period=int(row.period),
                 zone=str(row.zone),
@@ -167,7 +167,7 @@ def build_italy_market(
         for row in exchanges.itertuples(index=False):
             if str(row.zone).upper() not in zone_list:
                 continue
-            market.add_flow_boundary(
+            market.add_fixed_flow_boundary(
                 id=f"exchange_{row.zone}_{row.external_zone}_{int(row.period)}",
                 period=int(row.period),
                 zone=str(row.zone).upper(),
