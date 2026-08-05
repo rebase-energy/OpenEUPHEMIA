@@ -5,11 +5,20 @@ directory per month. Everything here is derived from public publications
 by [GME](https://www.mercatoelettrico.org) — free to download and use, no
 authentication required.
 
-| File | Columns | Source |
-|---|---|---|
-| `bid-curves.csv.gz` | `delivery_day, period, zone, side, price_eur_per_mwh, quantity_mwh` | MGP *Offerte pubbliche* |
-| `transfer-capacities.csv.gz` | `delivery_day, period, id, from_zone, to_zone, min_flow_mwh, max_flow_mwh` | MGP *Limiti di transito* |
-| `published-prices.csv.gz` | `delivery_day, period, zone, price_eur_per_mwh` | MGP *Prezzi* |
+| File | Columns | Source | Role |
+|---|---|---|---|
+| `bid-curves.csv.gz` | `delivery_day, period, zone, side, price_eur_per_mwh, quantity_mwh` | MGP *Offerte pubbliche* | input |
+| `transfer-capacities.csv.gz` | `delivery_day, period, id, from_zone, to_zone, min_flow_mwh, max_flow_mwh` | MGP *Limiti di transito* | input |
+| `published-prices.csv.gz` | `delivery_day, period, zone, price_eur_per_mwh` | MGP *Prezzi* | border zones are input, Italian zones are the target |
+| `published-exchanges.csv.gz` | `delivery_day, period, zone, external_zone, exchange_mwh` | MGP *Transiti* | input for the `exchanges` boundary |
+| `published-flows.csv.gz` | `delivery_day, period, from_zone, to_zone, flow_mwh` | MGP *Transiti* | **target only** |
+
+`published-flows` covers the six links *between* Italian zones and is never
+an input: it is what the flow validation is scored against.
+`published-exchanges` covers the twelve *cross-border* links and is an
+input under the `exchanges` boundary — the schedule with the rest of
+Europe, which Italy's clearing takes as given. Both are export-positive
+from the first-named zone.
 
 ## How the inputs were derived
 
@@ -45,8 +54,12 @@ neighbouring border zones. The border-zone prices close the model as
 price-taking boundaries; the Italian ones are the validation target and
 are never given to the solver.
 
+**Transits.** *Transiti* publishes the realized schedule of every edge per
+period. Split by endpoint, the internal edges become the flow validation
+target and the cross-border edges the exchange input.
+
 ## Coverage
 
-| Month | Days | Zone-hours | Notes |
-|---|---|---|---|
-| `2025-04` | 30 | 5,040 | Full month, hourly periods, 12 external borders |
+| Month | Days | Zone-hours | Link-hours | Notes |
+|---|---|---|---|---|
+| `2025-04` | 30 | 5,040 | 4,320 | Hourly periods, 7 zones, 6 internal links, 12 external borders |

@@ -61,6 +61,8 @@ class ClearingOptions:
     solver: str = "auto"
     method: str = "full-milp"
     iterations_count: int = 150
+    flow_selection: str | None = None
+    anchor_flows: Mapping[tuple[str, int], float] | None = None
 
 
 @dataclass(frozen=True)
@@ -448,6 +450,8 @@ class Market:
         *,
         solver: str = "auto",
         method: str = "full-milp",
+        flow_selection: str | None = None,
+        anchor_flows: Mapping[tuple[str, int], float] | None = None,
         options: ClearingOptions | None = None,
         iterations_count: int | None = None,
     ) -> MarketClearingResult:
@@ -458,6 +462,15 @@ class Market:
         solves one joint welfare-maximization MILP across all periods,
         ``"per-period-lp"`` clears each period as an independent LP — faster
         for large curve-only markets, but without per-order acceptance.
+
+        ``flow_selection`` picks which of the welfare-equal optima to
+        return. Welfare maximization determines the prices uniquely but
+        leaves the flows between equally priced zones indeterminate; a
+        selection rule resolves that residual freedom without touching the
+        prices. See :mod:`openeuphemia.solver.flow_selection` for the
+        available rules. ``anchor_flows`` supplies the reference schedule
+        the ``"anchored"`` rule matches. With ``flow_selection=None`` the
+        solver returns an arbitrary optimal vertex.
         """
 
         from openeuphemia.solver import clear_market
@@ -466,12 +479,16 @@ class Market:
             solver=solver,
             method=method,
             iterations_count=iterations_count or 150,
+            flow_selection=flow_selection,
+            anchor_flows=anchor_flows,
         )
         return clear_market(
             self,
             solver=clearing_options.solver,
             method=clearing_options.method,
             iterations_count=clearing_options.iterations_count,
+            flow_selection=clearing_options.flow_selection,
+            anchor_flows=clearing_options.anchor_flows,
         )
 
     def validate(self) -> None:

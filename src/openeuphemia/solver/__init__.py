@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+from typing import Mapping
+
 from openeuphemia.core import Market, MarketClearingResult
+from openeuphemia.solver.flow_selection import (
+    FLOW_SELECTION_METHODS,
+    clear_market_with_flow_selection,
+)
 from openeuphemia.solver.market import solve_component_market
 from openeuphemia.solver.per_period import (
     clear_by_period_prices_only,
@@ -13,9 +19,11 @@ CLEARING_METHODS = ("full-milp", "per-period-lp")
 
 __all__ = [
     "CLEARING_METHODS",
+    "FLOW_SELECTION_METHODS",
     "clear_by_period_prices_only",
     "clear_market",
     "clear_market_per_period",
+    "clear_market_with_flow_selection",
     "solve_component_market",
 ]
 
@@ -26,6 +34,8 @@ def clear_market(
     solver: str = "auto",
     method: str = "full-milp",
     iterations_count: int = 150,
+    flow_selection: str | None = None,
+    anchor_flows: Mapping[tuple[str, int], float] | None = None,
 ) -> MarketClearingResult:
     """Clear a component-table market.
 
@@ -40,9 +50,22 @@ def clear_market(
       aggregated curve markets; returns no per-order acceptance, and periods
       containing block orders fall back to the MILP formulation.
 
+    ``flow_selection`` applies a selection rule over the welfare optimum to
+    resolve which of the equally optimal flow patterns is returned; see
+    :mod:`openeuphemia.solver.flow_selection`. It supersedes ``method``,
+    since the rules are implemented per period.
+
     ``iterations_count`` is reserved for iterative clearing procedures
     (e.g. MIBEL complex conditions) and is currently unused.
     """
+
+    if flow_selection is not None:
+        return clear_market_with_flow_selection(
+            market,
+            method=flow_selection,
+            anchor_flows=anchor_flows,
+            solver=solver,
+        )
 
     normalized_method = method.lower().replace("_", "-")
     if normalized_method not in CLEARING_METHODS:

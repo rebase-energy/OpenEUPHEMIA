@@ -12,11 +12,26 @@ A market clearing publishes two outcomes: the **zonal prices** and the **flows**
 
 | Case | Period | Prices | Flows | Run it |
 |---|---|---|---|---|
-| **Italy** (GME MGP) | April 2025 | ✅ **5,040 / 5,040 zone-hours exact** — MAE 0.0000 EUR/MWh | 🚧 not yet validated | [notebook](examples/italy_april_2025.ipynb) · [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/rebase-energy/OpenEUPHEMIA/blob/main/examples/italy_april_2025.ipynb) |
+| **Italy** (GME MGP) | April 2025 | ✅ **5,040 / 5,040 zone-hours exact** — MAE 0.0000 EUR/MWh | ✅ **0.0012 MWh MAE** over 4,320 link-hours — max 0.10 MWh | [notebook](examples/italy_april_2025.ipynb) · [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/rebase-energy/OpenEUPHEMIA/blob/main/examples/italy_april_2025.ipynb) |
 
-Each case builds its market from published data only, clears it, and compares against the outcome the market operator published. Crucially, **no observed flows or tie-break rules are used**: scheduled exchanges are an *outcome* of the clearing, so feeding them back in would make the exercise circular.
+Each case builds its market from published data only, clears it, and compares against the outcome the market operator published. Neither result uses the quantity it predicts: the Italian zonal prices and the flows between Italian zones are held back for scoring.
 
-Prices come first because they are pinned down uniquely by welfare maximization. Flows are not: whenever two zones settle at the same price, the split of the exchange between them is genuinely indeterminate — many flow patterns support the identical, optimal welfare — so reproducing the published flows needs a further rule that is not in the public description. That is the next milestone, and until a case reproduces flows exactly its column stays marked 🚧.
+The two halves are different in kind.
+
+**Prices follow from welfare maximization alone.** Given the published order book and capacities, the optimum has a unique price solution and it is the one GME published — no rule, no tuning. It needs only the neighbours' published prices to close the borders; France and Greece are never modelled, merely priced.
+
+**Flows need a selection rule on top.** Whenever two zones settle at the same price the exchange between them is genuinely indeterminate: many flow patterns support the identical, maximal welfare, so the solver returns an arbitrary one. A *selection rule* — a secondary objective over the welfare optimum, which by construction leaves the prices untouched — decides which. Measured over April 2025:
+
+| Flow selection | Flow MAE | Exact link-hours | Reads the answer? |
+|---|---|---|---|
+| none — arbitrary optimal vertex | 2.89 MWh | 3,818 / 4,320 | no |
+| volume maximization (documented) | 2.90 MWh | 3,814 / 4,320 | no |
+| **pro-rata sharing** (learned) | **0.0012 MWh** | 4,208 / 4,320 | no |
+| anchored to the published schedule | 0.0001 MWh | 4,311 / 4,320 | yes — a reference bound, not a prediction |
+
+Pro-rata — sharing tied same-price acceptance in proportion to submitted volume — removes three orders of magnitude of error while consuming no outcome data, and lands essentially on the anchored floor. Two caveats stated plainly: it is **not in EUPHEMIA's public description** but reverse-engineered from published outcomes, and it is **era-dependent** — before the 2025 abolition of the PUN the published splits instead follow the description's documented merit-order priority rule, which needs an order book rather than aggregated curves.
+
+Scoring flows also requires closing the borders differently. A price-taking border is free to trade any volume within its capacity, so the border volume floats and drags the internal flows with it; the flow figures above pin each border at its published exchange instead (`boundary="exchanges"`). That schedule with the rest of Europe is an *input* to Italy's problem — it says nothing about how flow splits between Italian zones, which is what is being predicted.
 
 ## How a case works
 
@@ -24,9 +39,9 @@ A market is assembled from three tidy tables and cleared as a welfare-maximizing
 
 1. **Bid curves** — every submitted bid and offer, aggregated into one supply and one demand curve per zone and period.
 2. **Transfer capacities** — the published limit of each link between zones.
-3. **Boundary conditions** — each border with the un-modelled world becomes a *price taker* at the neighbouring zone's published price, bounded by the published border capacity (a Dirichlet boundary condition). The border prices turn out to be a sufficient statistic for the rest of Europe.
+3. **Boundary conditions** — each border with the un-modelled world is closed either as a *price taker* at the neighbouring zone's published price (Dirichlet) or at a known exchange volume (Neumann).
 
-Zonal prices are then the dual values of the zonal balance constraints, solved with [HiGHS](https://highs.dev) — exactly how EUPHEMIA defines them.
+Zonal prices are then the dual values of the zonal balance constraints, solved with [HiGHS](https://highs.dev) — exactly how EUPHEMIA defines them. An optional **flow selection** rule resolves what welfare leaves undecided about the flows.
 
 ## Installation
 
@@ -68,6 +83,12 @@ result.prices
 
 Boundaries come in both flavours: `add_fixed_price_boundary` for a price-taking neighbour and `add_fixed_flow_boundary` to pin an exchange at a known volume. `BidCurve.from_steps` builds a curve from unsorted (price, quantity) pairs, and `bid_curves_from_table` builds a whole market's worth from a dataframe.
 
+To resolve which of the welfare-equal flow patterns is returned, pass a selection rule — the prices are read before it applies and stay untouched:
+
+```python
+market.clear(flow_selection="pro-rata")     # or "volume-max", or "anchored"
+```
+
 The [Italy notebook](examples/italy_april_2025.ipynb) applies exactly these steps to real data and reproduces a full month of published prices.
 
 ## Reproducing the Italy case
@@ -75,14 +96,13 @@ The [Italy notebook](examples/italy_april_2025.ipynb) applies exactly these step
 The validation inputs are committed under [`data/italy`](data/italy), so everything runs offline:
 
 ```bash
-python scripts/replicate_italy_prices.py            # all 30 days of April 2025
-python scripts/replicate_italy_prices.py --day 2025-04-01
+python scripts/replicate_italy_prices.py            # prices, all 30 days of April 2025
+python scripts/replicate_italy_prices.py --boundary exchanges --flow-selection pro-rata
 ```
 
 ```
-2025-04-01  MAE 0.0000  max 0.000  exact 168/168  dropped-borders 0
-...
 TOTAL  MAE 0.0000  max 0.000  exact 5040/5040
+TOTAL  flow MAE 0.0012  max 0.100  exact 4208/4320
 ```
 
 ## Scope
@@ -91,7 +111,7 @@ This library is about **building, closing, and clearing markets** — not about 
 
 ## Roadmap
 
-- **Italy** — prices replicated exactly ✅. Next: the flows, and with them the cleared volumes per zone.
+- **Italy** — prices and flows both replicated ✅. Open: closing the one remaining flow gap without pinning the border exchanges, and the floor-price curtailment hours, where the sharing set appears to be set by non-public configuration rather than by the optimization.
 - **Nordics / MIBEL / CWE** — extend the same curve + boundary-condition methodology, region by region, each gated on exact replication of published outcomes.
 - **Full SDAC** — one coupled clearing of all regions, closing the boundary conditions internally.
 

@@ -33,6 +33,9 @@ from openeuphemia.system import System
 ITALY_PRICE_AREAS = ("NORD", "CNOR", "CSUD", "SUD", "CALA", "SICI", "SARD")
 
 PRICE_TOLERANCE_EUR = 0.005
+FLOW_TOLERANCE_MWH = 0.01
+
+BOUNDARY_CONDITIONS = ("prices", "exchanges")
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,7 @@ class ItalyReplicationResult:
     market: Market
     clearing: MarketClearingResult
     price_comparison: pd.DataFrame
+    flow_comparison: pd.DataFrame
     boundary_diagnostics: pd.DataFrame
     summary: dict[str, Any]
 
@@ -61,6 +65,8 @@ def build_italy_market(
     bid_curves: pd.DataFrame,
     transfer_capacities: pd.DataFrame,
     published_prices: pd.DataFrame,
+    published_exchanges: pd.DataFrame | None = None,
+    boundary: str = "prices",
     zones: Sequence[str] = ITALY_PRICE_AREAS,
 ) -> ItalyMarket:
     """Assemble one Italian delivery day into a clearable :class:`Market`.
@@ -68,9 +74,30 @@ def build_italy_market(
     The market is built through the same incremental API a user would call
     by hand: a :class:`~openeuphemia.system.System` of zones and
     interconnectors, ``add_bid_curve`` per zone and period, ``set_ntc`` for
-    the internal transfer capacities, and ``add_fixed_price_boundary`` for
-    every external border.
+    the internal transfer capacities, and a boundary condition per external
+    border.
+
+    ``boundary`` selects how the model is closed at the border:
+
+    - ``"prices"`` (default) — each border is a price taker at the
+      neighbour's published price, free to trade within the published
+      border capacity. This is what pins the *prices* down, and it needs no
+      exchange data. It leaves the border *volumes* free, though: inside
+      the capacity box many exchange patterns are welfare-equal, so the
+      internal flows they imply are not determined.
+    - ``"exchanges"`` — each border is fixed at its published exchange
+      (``published_exchanges`` required). The borders no longer float, so
+      the internal flows become comparable with the published schedule.
+      The exchange enters as a problem *input*, the way a TSO's schedule
+      would; it is not a tie-break on the Italian flows.
     """
+
+    if boundary not in BOUNDARY_CONDITIONS:
+        raise ValueError(
+            f"boundary must be one of {sorted(BOUNDARY_CONDITIONS)}, got {boundary!r}"
+        )
+    if boundary == "exchanges" and published_exchanges is None:
+        raise ValueError("the exchanges boundary requires published_exchanges")
 
     day = date.fromisoformat(str(delivery_day)).isoformat()
     zone_list = tuple(str(zone).upper() for zone in zones)
@@ -109,13 +136,13 @@ def build_italy_market(
         ),
     )
     market = Market(
-        name=f"italy-price-replication-{day}",
+        name=f"italy-{day}",
         delivery_day=day,
         system=system,
         periods=periods,
         metadata={
-            "scenario": "italy-price-replication",
-            "boundary_condition": "price-taking-published-border-prices",
+            "scenario": "italy-replication",
+            "boundary_condition": boundary,
         },
     )
     for (period, zone), sides in sorted(curves.items()):
@@ -128,16 +155,30 @@ def build_italy_market(
             forward_capacity_mwh=float(row.forward_capacity_mwh),
             reverse_capacity_mwh=float(row.reverse_capacity_mwh),
         )
-    for row in boundary_prices.itertuples(index=False):
-        market.add_fixed_price_boundary(
-            id=str(row.id),
-            period=int(row.period),
-            zone=str(row.zone),
-            external_zone=str(row.external_zone),
-            price_eur_per_mwh=float(row.price_eur_per_mwh),
-            import_capacity_mwh=float(row.import_capacity_mwh),
-            export_capacity_mwh=float(row.export_capacity_mwh),
-        )
+    if boundary == "prices":
+        for row in boundary_prices.itertuples(index=False):
+            market.add_fixed_price_boundary(
+                id=str(row.id),
+                period=int(row.period),
+                zone=str(row.zone),
+                external_zone=str(row.external_zone),
+                price_eur_per_mwh=float(row.price_eur_per_mwh),
+                import_capacity_mwh=float(row.import_capacity_mwh),
+                export_capacity_mwh=float(row.export_capacity_mwh),
+            )
+    else:
+        exchanges = rows_for_day(published_exchanges, day)
+        for row in exchanges.itertuples(index=False):
+            if str(row.zone).upper() not in zone_list:
+                continue
+            market.add_fixed_flow_boundary(
+                id=f"exchange_{row.zone}_{row.external_zone}_{int(row.period)}",
+                period=int(row.period),
+                zone=str(row.zone).upper(),
+                external_zone=str(row.external_zone).upper(),
+                quantity_mwh=float(row.exchange_mwh),
+            )
+    market.validate()
     return ItalyMarket(market=market, boundary_diagnostics=boundary_diagnostics)
 
 
@@ -147,10 +188,25 @@ def replicate_italy_day(
     bid_curves: pd.DataFrame,
     transfer_capacities: pd.DataFrame,
     published_prices: pd.DataFrame,
+    published_flows: pd.DataFrame | None = None,
+    published_exchanges: pd.DataFrame | None = None,
+    boundary: str = "prices",
+    flow_selection: str | None = None,
     zones: Sequence[str] = ITALY_PRICE_AREAS,
     solver: str = "auto",
 ) -> ItalyReplicationResult:
-    """Build, clear, and validate one delivery day against the published prices."""
+    """Build, clear, and validate one delivery day against the published results.
+
+    ``flow_selection`` picks the rule that resolves which of the
+    welfare-equal flow patterns is returned (see
+    :mod:`openeuphemia.solver.flow_selection`); with ``None`` the solver
+    returns an arbitrary optimal vertex. The ``"anchored"`` rule matches
+    ``published_flows``, so it consumes the outcome it is validated
+    against — a reference bound, not a prediction.
+
+    When ``published_flows`` is given the result carries a flow comparison
+    alongside the price comparison.
+    """
 
     day = date.fromisoformat(str(delivery_day)).isoformat()
     zone_list = tuple(str(zone).upper() for zone in zones)
@@ -159,16 +215,36 @@ def replicate_italy_day(
         bid_curves=bid_curves,
         transfer_capacities=transfer_capacities,
         published_prices=published_prices,
+        published_exchanges=published_exchanges,
+        boundary=boundary,
         zones=zone_list,
     )
     market = built.market
-    clearing = market.clear(solver=solver, method="per-period-lp")
+
+    if flow_selection == "anchored" and published_flows is None:
+        raise ValueError("the anchored flow selection requires published_flows")
+    anchors = (
+        flow_mapping(published_flows, market.interconnectors, delivery_day=day)
+        if flow_selection == "anchored"
+        else None
+    )
+    clearing = market.clear(
+        solver=solver,
+        method="per-period-lp",
+        flow_selection=flow_selection,
+        anchor_flows=anchors,
+    )
 
     prices = price_mapping(published_prices, delivery_day=day)
     price_comparison = compare_prices(
         clearing.prices,
         {key: value for key, value in prices.items() if key[1] in zone_list},
         delivery_day=day,
+    )
+    flow_comparison = (
+        compare_flows(clearing.flows, published_flows, delivery_day=day)
+        if published_flows is not None
+        else pd.DataFrame()
     )
     dropped = built.boundary_diagnostics[
         built.boundary_diagnostics["treatment"] == "unpriced-dropped"
@@ -181,14 +257,18 @@ def replicate_italy_day(
         "interconnectors": int(len(market.interconnectors)),
         "boundary_price_rows": int(len(market.boundary_prices)),
         "dropped_unpriced_borders": int(len(dropped)),
+        "boundary": boundary,
+        "flow_selection": flow_selection,
         "objective_value": float(clearing.objective_value),
         **summarize_price_comparison(price_comparison),
+        **summarize_flow_comparison(flow_comparison),
     }
     return ItalyReplicationResult(
         delivery_day=day,
         market=market,
         clearing=clearing,
         price_comparison=price_comparison,
+        flow_comparison=flow_comparison,
         boundary_diagnostics=built.boundary_diagnostics,
         summary=summary,
     )
@@ -374,6 +454,29 @@ def price_mapping(
     }
 
 
+def flow_mapping(
+    flows: pd.DataFrame,
+    interconnectors: pd.DataFrame,
+    *,
+    delivery_day: str | date | None = None,
+) -> dict[tuple[str, int], float]:
+    """Key a tidy flow table by the market's own link ids.
+
+    Flow tables name a link by its endpoints, but a built market names it
+    by an id whose orientation may be the opposite one, so each flow is
+    re-signed to the direction its interconnector row points in.
+    """
+
+    published = _canonical_flows(flows, delivery_day)
+    anchors: dict[tuple[str, int], float] = {}
+    for row in interconnectors.itertuples(index=False):
+        pair, sign = _canonical_pair(row.from_zone, row.to_zone)
+        value = published.get((int(row.period), pair))
+        if value is not None:
+            anchors[(str(row.id), int(row.period))] = sign * value
+    return anchors
+
+
 def rows_for_day(frame: pd.DataFrame, delivery_day: str | date) -> pd.DataFrame:
     """Select the rows of a multi-day table belonging to one delivery day."""
 
@@ -422,6 +525,84 @@ def compare_prices(
             }
         )
     return pd.DataFrame(rows)
+
+
+def compare_flows(
+    flows: pd.DataFrame,
+    published_flows: pd.DataFrame,
+    *,
+    delivery_day: str,
+) -> pd.DataFrame:
+    """One row per published (link, period) flow with the model's error.
+
+    Both sides are compared in a canonical orientation, so it does not
+    matter which way round either table names a link.
+    """
+
+    modelled = flows[flows["flow_type"] == "interconnector"] if not flows.empty else flows
+    estimates = _canonical_flows(modelled, None)
+    rows: list[dict[str, object]] = []
+    for key, reference in sorted(_canonical_flows(published_flows, delivery_day).items()):
+        period, (from_zone, to_zone) = int(key[0]), key[1]
+        estimated = estimates.get(key)
+        error = math.nan if estimated is None else float(estimated) - float(reference)
+        rows.append(
+            {
+                "delivery_day": delivery_day,
+                "period": period,
+                "from_zone": from_zone,
+                "to_zone": to_zone,
+                "modelled_flow_mwh": estimated,
+                "published_flow_mwh": float(reference),
+                "error_mwh": error,
+                "absolute_error_mwh": abs(error) if math.isfinite(error) else math.nan,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _canonical_pair(from_zone: Any, to_zone: Any) -> tuple[tuple[str, str], float]:
+    """Order a link's endpoints, with the sign that re-orients its flow."""
+
+    a, b = str(from_zone).upper(), str(to_zone).upper()
+    return ((a, b), 1.0) if a <= b else ((b, a), -1.0)
+
+
+def _canonical_flows(
+    flows: pd.DataFrame,
+    delivery_day: str | date | None,
+) -> dict[tuple[int, tuple[str, str]], float]:
+    frame = flows if delivery_day is None else rows_for_day(flows, delivery_day)
+    result: dict[tuple[int, tuple[str, str]], float] = {}
+    for row in frame.itertuples(index=False):
+        if pd.isna(row.flow_mwh):
+            continue
+        pair, sign = _canonical_pair(row.from_zone, row.to_zone)
+        result[(int(row.period), pair)] = sign * float(row.flow_mwh)
+    return result
+
+
+def summarize_flow_comparison(
+    comparison: pd.DataFrame,
+    *,
+    tolerance_mwh: float = FLOW_TOLERANCE_MWH,
+) -> dict[str, Any]:
+    """MAE, max error, and exact-row count of a flow comparison frame."""
+
+    if comparison.empty:
+        return {
+            "flow_rows": 0,
+            "exact_flow_rows": 0,
+            "flow_mae_mwh": None,
+            "flow_max_abs_error_mwh": None,
+        }
+    errors = comparison["absolute_error_mwh"].dropna()
+    return {
+        "flow_rows": int(len(errors)),
+        "exact_flow_rows": int((errors <= tolerance_mwh).sum()),
+        "flow_mae_mwh": float(errors.mean()) if len(errors) else None,
+        "flow_max_abs_error_mwh": float(errors.max()) if len(errors) else None,
+    }
 
 
 def summarize_price_comparison(
