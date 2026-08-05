@@ -25,7 +25,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from openeuphemia.italy import (
+from openeuphemia.areas.italy import (
     delivery_days,
     replicate_italy_day,
     summarize_flow_comparison,

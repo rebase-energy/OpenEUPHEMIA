@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from openeuphemia.italy.replication import (
+from openeuphemia.areas.italy.replication import (
     BOUNDARY_CONDITIONS,
     ITALY_PRICE_AREAS,
     ItalyMarket,

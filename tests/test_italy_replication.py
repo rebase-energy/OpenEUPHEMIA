@@ -3,7 +3,7 @@
 import pandas as pd
 import pytest
 
-from openeuphemia.italy.replication import (
+from openeuphemia.areas.italy.replication import (
     build_italy_market,
     external_boundary_prices,
     external_capacity_bounds,
