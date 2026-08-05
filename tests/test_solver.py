@@ -2,11 +2,11 @@
 
 import pandas as pd
 
-from openeuphemia.core import Market
+from openeuphemia.core import PowerMarket
 from openeuphemia.solver import clear_market
 
 
-def two_zone_market(max_flow: float) -> Market:
+def two_zone_market(max_flow: float) -> PowerMarket:
     orders = pd.DataFrame(
         [
             {"id": "a_s", "period": 1, "zone": "A", "side": "supply", "price_eur_per_mwh": 10.0, "quantity_mwh": 100.0},
@@ -27,7 +27,7 @@ def two_zone_market(max_flow: float) -> Market:
             }
         ]
     )
-    return Market(
+    return PowerMarket(
         name="two-zone",
         delivery_day="2025-04-01",
         zones=["A", "B"],

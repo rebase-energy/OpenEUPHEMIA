@@ -13,12 +13,12 @@ from typing import Sequence
 
 import pandas as pd
 
-from openeuphemia.core import Market, MarketClearingResult
+from openeuphemia.core import PowerMarket, MarketClearingResult
 from openeuphemia.solver.market import _build_model, _flow_results, _run_highs
 
 
 def clear_market_per_period(
-    market: Market,
+    market: PowerMarket,
     *,
     solver: str = "auto",
 ) -> MarketClearingResult:
@@ -90,8 +90,8 @@ def clear_market_per_period(
 clear_by_period_prices_only = clear_market_per_period
 
 
-def _period_market(market: Market, period: int) -> Market:
-    return Market(
+def _period_market(market: PowerMarket, period: int) -> PowerMarket:
+    return PowerMarket(
         name=f"{market.name}-period-{period}",
         delivery_day=market.delivery_day,
         zones=market.zones.copy(),

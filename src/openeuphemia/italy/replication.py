@@ -26,9 +26,8 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
-from openeuphemia.core import Market, MarketClearingResult
+from openeuphemia.core import MarketClearingResult, PowerMarket
 from openeuphemia.curves import bid_curves_from_table
-from openeuphemia.system import System
 
 ITALY_PRICE_AREAS = ("NORD", "CNOR", "CSUD", "SUD", "CALA", "SICI", "SARD")
 
@@ -40,9 +39,9 @@ BOUNDARY_CONDITIONS = ("prices", "exchanges")
 
 @dataclass(frozen=True)
 class ItalyMarket:
-    """An Italian delivery day built into a clearable :class:`Market`."""
+    """An Italian delivery day built into a clearable :class:`PowerMarket`."""
 
-    market: Market
+    market: PowerMarket
     boundary_diagnostics: pd.DataFrame
 
 
@@ -51,7 +50,7 @@ class ItalyReplicationResult:
     """Outcome of replicating one delivery day of Italian zonal prices."""
 
     delivery_day: str
-    market: Market
+    market: PowerMarket
     clearing: MarketClearingResult
     price_comparison: pd.DataFrame
     flow_comparison: pd.DataFrame
@@ -69,12 +68,12 @@ def build_italy_market(
     boundary: str = "prices",
     zones: Sequence[str] = ITALY_PRICE_AREAS,
 ) -> ItalyMarket:
-    """Assemble one Italian delivery day into a clearable :class:`Market`.
+    """Assemble one Italian delivery day into a clearable :class:`PowerMarket`.
 
     The market is built through the same incremental API a user would call
-    by hand: a :class:`~openeuphemia.system.System` of zones and
-    interconnectors, ``add_bid_curve`` per zone and period, ``set_ntc`` for
-    the internal transfer capacities, and a boundary condition per external
+    by hand: zones and interconnectors declared on the ``PowerMarket``
+    itself, ``add_bid_curve`` per zone and period, ``set_ntc`` for the
+    internal transfer capacities, and a boundary condition per external
     border.
 
     ``boundary`` selects how the model is closed at the border:
@@ -126,7 +125,9 @@ def build_italy_market(
         {key: value for key, value in prices.items() if key[1] not in zone_list},
     )
 
-    system = System(
+    market = PowerMarket(
+        name=f"italy-{day}",
+        delivery_day=day,
         zones=list(zone_list),
         interconnectors=sorted(
             {
@@ -134,11 +135,6 @@ def build_italy_market(
                 for row in capacities.itertuples(index=False)
             }
         ),
-    )
-    market = Market(
-        name=f"italy-{day}",
-        delivery_day=day,
-        system=system,
         periods=periods,
         metadata={
             "scenario": "italy-replication",
@@ -157,7 +153,7 @@ def build_italy_market(
         )
     if boundary == "prices":
         for row in boundary_prices.itertuples(index=False):
-            market.add_fixed_price_boundary(
+            market.add_price_boundary(
                 id=str(row.id),
                 period=int(row.period),
                 zone=str(row.zone),
@@ -171,7 +167,7 @@ def build_italy_market(
         for row in exchanges.itertuples(index=False):
             if str(row.zone).upper() not in zone_list:
                 continue
-            market.add_fixed_flow_boundary(
+            market.add_flow_boundary(
                 id=f"exchange_{row.zone}_{row.external_zone}_{int(row.period)}",
                 period=int(row.period),
                 zone=str(row.zone).upper(),

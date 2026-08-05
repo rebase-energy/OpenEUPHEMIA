@@ -3,11 +3,11 @@
 import pandas as pd
 import pytest
 
-from openeuphemia.core import Market
+from openeuphemia.core import PowerMarket
 from openeuphemia.solver.flow_selection import clear_market_with_flow_selection
 
 
-def degenerate_market() -> Market:
+def degenerate_market() -> PowerMarket:
     """Two zones that clear at the same price with tied, indeterminate supply.
 
     Each zone offers 100 MWh at 10 EUR and demands (40, 60) MWh at the cap.
@@ -36,7 +36,7 @@ def degenerate_market() -> Market:
             }
         ]
     )
-    return Market(
+    return PowerMarket(
         name="degenerate",
         delivery_day="2025-04-01",
         zones=["A", "B"],
@@ -98,7 +98,7 @@ def test_volume_maximization_accepts_zero_surplus_matches():
             {"id": "d", "period": 1, "zone": "A", "side": "demand", "price_eur_per_mwh": 10.0, "quantity_mwh": 50.0},
         ]
     )
-    market = Market(
+    market = PowerMarket(
         name="tied", delivery_day="2025-04-01", zones=["A"], periods=[1], orders=orders
     )
     result = clear_market_with_flow_selection(market, method="volume-max")

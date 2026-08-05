@@ -6,6 +6,28 @@ import pytest
 from openeuphemia import BidCurve, bid_curves_from_table
 
 
+def test_volume_price_pairs_is_the_default_constructor():
+    curve = BidCurve([(100.0, 10.0), (200.0, 80.0)])
+    assert curve.cumulative_volumes == (100.0, 200.0)
+    assert curve.prices == (10.0, 80.0)
+
+
+def test_volume_price_pairs_and_two_list_form_are_equivalent():
+    from_pairs = BidCurve([(100.0, 10.0), (200.0, 80.0)])
+    from_lists = BidCurve(prices=[10.0, 80.0], cumulative_volumes=[100.0, 200.0])
+    assert from_pairs == from_lists
+
+
+def test_bid_curve_rejects_both_forms_at_once():
+    with pytest.raises(ValueError, match="not both"):
+        BidCurve([(100.0, 10.0)], prices=[10.0], cumulative_volumes=[100.0])
+
+
+def test_bid_curve_requires_one_form():
+    with pytest.raises(ValueError, match="requires either"):
+        BidCurve()
+
+
 def test_from_steps_orders_and_accumulates_supply():
     curve = BidCurve.from_steps([60.0, 50.0], [4.0, 10.0], side="supply")
     assert curve.prices == (50.0, 60.0)

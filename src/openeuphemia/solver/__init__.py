@@ -1,10 +1,10 @@
-"""Market clearing solver entrypoints."""
+"""Market-clearing solver entrypoints."""
 
 from __future__ import annotations
 
 from typing import Mapping
 
-from openeuphemia.core import Market, MarketClearingResult
+from openeuphemia.core import PowerMarket, MarketClearingResult
 from openeuphemia.solver.flow_selection import (
     FLOW_SELECTION_METHODS,
     clear_market_with_flow_selection,
@@ -29,7 +29,7 @@ __all__ = [
 
 
 def clear_market(
-    market: Market,
+    market: PowerMarket,
     *,
     solver: str = "auto",
     method: str = "full-milp",

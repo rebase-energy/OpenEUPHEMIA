@@ -101,7 +101,7 @@ def test_only_the_requested_day_is_used():
     assert result.summary["exact_rows"] == 2
 
 
-def test_market_is_built_from_a_system_with_bid_curves_and_boundaries():
+def test_market_declares_zones_and_interconnectors_with_bid_curves_and_boundaries():
     bid_curves, capacities, prices = synthetic_inputs()
     built = build_italy_market(
         delivery_day=DAY,
@@ -111,8 +111,7 @@ def test_market_is_built_from_a_system_with_bid_curves_and_boundaries():
         zones=("NORD", "SUD"),
     )
     market = built.market
-    assert market.system is not None
-    assert market.system.has_interconnector("NORD", "SUD")
+    assert market.has_interconnector("NORD", "SUD")
     # The one external border became a price-taking boundary, not a link.
     assert list(market.boundary_prices["external_zone"]) == ["XFRA"]
     assert market.boundary_flows.empty

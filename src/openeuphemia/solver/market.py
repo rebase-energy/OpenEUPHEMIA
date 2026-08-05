@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 import pandas as pd
 
-from openeuphemia.core import DEMAND, Market, MarketClearingResult
+from openeuphemia.core import DEMAND, PowerMarket, MarketClearingResult
 from openeuphemia.exceptions import InfeasibleMarketError, SolverUnavailableError
 
 TOLERANCE = 1e-7
@@ -22,11 +22,11 @@ class _BuiltMarketModel:
     flow_vars: dict[tuple[str, int], Any]
     boundary_price_vars: dict[tuple[str, int], Any]
     balance_constraints: dict[tuple[int, str], Any]
-    market: Market
+    market: PowerMarket
 
 
 def solve_component_market(
-    market: Market,
+    market: PowerMarket,
     *,
     solver: str = "auto",
     include_accepted_orders: bool = True,
@@ -78,7 +78,7 @@ def solve_component_market(
 
 
 def _build_model(
-    market: Market,
+    market: PowerMarket,
     *,
     fixed_block_values: Mapping[str, int] | None = None,
 ) -> _BuiltMarketModel:
@@ -166,7 +166,7 @@ def _block_activation_var(
 
 def _add_block_parent_constraints(
     h: Any,
-    market: Market,
+    market: PowerMarket,
     block_vars: Mapping[str, Any],
 ) -> None:
     if market.block_orders.empty or "parent_block_id" not in market.block_orders.columns:
@@ -189,7 +189,7 @@ def _add_block_parent_constraints(
 
 def _add_balance_constraints(
     h: Any,
-    market: Market,
+    market: PowerMarket,
     order_vars: Mapping[str, Any],
     block_vars: Mapping[str, Any],
     flow_vars: Mapping[tuple[str, int], Any],
@@ -324,7 +324,7 @@ def _accepted_order_results(model: _BuiltMarketModel) -> pd.DataFrame:
 
 def _add_flow_based_constraints(
     h: Any,
-    market: Market,
+    market: PowerMarket,
     flow_vars: Mapping[tuple[str, int], Any],
     boundary_price_vars: Mapping[tuple[str, int], Any],
 ) -> None:
@@ -415,7 +415,7 @@ def _welfare_coefficient(side: str, price: float) -> float:
     return float(price) if side == DEMAND else -float(price)
 
 
-def _block_objective_coefficients(market: Market) -> dict[str, float]:
+def _block_objective_coefficients(market: PowerMarket) -> dict[str, float]:
     if market.block_orders.empty:
         return {}
     coefficients: dict[str, float] = {}

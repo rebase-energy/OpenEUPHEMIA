@@ -10,7 +10,6 @@ import pandas as pd
 
 if TYPE_CHECKING:
     from openeuphemia.curves import BidCurve
-    from openeuphemia.system import System
 
 COUPLING_MODES = ("ntc",)
 
@@ -116,22 +115,28 @@ class MarketClearingResult:
         }
 
 
-class Market:
-    """Day-ahead zonal market represented by PyPSA-like component tables."""
+class PowerMarket:
+    """Day-ahead zonal power market: zones, interconnectors, orders, and
+    boundary conditions, represented as PyPSA-like component tables.
+
+    ``interconnectors`` accepts either the materialized per-period capacity
+    table (a DataFrame with ``min_flow_mwh``/``max_flow_mwh`` columns) or a
+    plain list of ``(from_zone, to_zone)`` pairs that declares the topology
+    only, leaving the capacities to :meth:`set_ntc`.
+    """
 
     def __init__(
         self,
         *,
         name: str = "market",
         delivery_day: str,
-        system: System | None = None,
         coupling: str | None = None,
         zones: pd.DataFrame | list[str] | tuple[str, ...] | None = None,
+        interconnectors: pd.DataFrame | Sequence[tuple[str, str]] | None = None,
         periods: pd.DataFrame | list[int] | tuple[int, ...] | None = None,
         orders: pd.DataFrame | None = None,
         block_orders: pd.DataFrame | None = None,
         complex_orders: pd.DataFrame | None = None,
-        interconnectors: pd.DataFrame | None = None,
         boundary_flows: pd.DataFrame | None = None,
         boundary_prices: pd.DataFrame | None = None,
         flow_based_constraints: pd.DataFrame | None = None,
@@ -144,21 +149,18 @@ class Market:
             raise ValueError(
                 f"coupling must be one of {sorted(COUPLING_MODES)}, got {coupling!r}"
             )
-        if system is not None and zones is not None:
-            raise ValueError("pass either system or zones, not both")
         self.name = name
         self.delivery_day = str(delivery_day)
-        self.system = system
         self.coupling = normalized_coupling
         self._ntc: dict[tuple[str, str], dict[int | None, tuple[float, float]]] = {}
-        if system is not None:
-            zones = list(system.zones)
         self.zones = _zones_frame(zones)
         self.periods = _periods_frame(periods)
         self.orders = _copy_or_empty(orders)
         self.block_orders = _copy_or_empty(block_orders)
         self.complex_orders = _copy_or_empty(complex_orders)
-        self.interconnectors = _copy_or_empty(interconnectors)
+        self.interconnectors, self._interconnector_pairs = _split_interconnectors(
+            interconnectors, self.zones
+        )
         self.boundary_flows = _copy_or_empty(boundary_flows)
         self.boundary_prices = _copy_or_empty(boundary_prices)
         self.flow_based_constraints = _copy_or_empty(flow_based_constraints)
@@ -175,11 +177,11 @@ class Market:
         orders: pd.DataFrame | None = None,
         block_orders: pd.DataFrame | None = None,
         complex_orders: pd.DataFrame | None = None,
-        interconnectors: pd.DataFrame | None = None,
+        interconnectors: pd.DataFrame | Sequence[tuple[str, str]] | None = None,
         boundary_flows: pd.DataFrame | None = None,
         boundary_prices: pd.DataFrame | None = None,
         metadata: Mapping[str, Any] | None = None,
-    ) -> Market:
+    ) -> PowerMarket:
         return cls(
             name=name,
             delivery_day=delivery_day,
@@ -195,7 +197,7 @@ class Market:
         )
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> Market:
+    def from_dict(cls, value: Mapping[str, Any]) -> PowerMarket:
         return cls(
             name=str(value.get("name", "market")),
             delivery_day=str(value["delivery_day"]),
@@ -235,7 +237,7 @@ class Market:
 
         if supply is None and demand is None:
             raise ValueError("add_bid_curve requires a supply and/or demand curve")
-        self._require_system_zone(zone)
+        self._require_known_zone(zone)
         existing_ids: set[str] = (
             set()
             if self.orders.empty or "id" not in self.orders.columns
@@ -280,7 +282,7 @@ class Market:
 
         if side not in SIDES:
             raise ValueError(f"side must be one of {sorted(SIDES)}, got {side!r}")
-        self._require_system_zone(zone)
+        self._require_known_zone(zone)
         period_list = [periods] if isinstance(periods, int) else list(periods)
         if not period_list:
             raise ValueError("block order requires at least one period")
@@ -308,22 +310,17 @@ class Market:
         reverse_capacity_mwh: float | None = None,
         period: int | None = None,
     ) -> None:
-        """Set the net transfer capacity of a system interconnector.
+        """Set the net transfer capacity of a declared interconnector.
 
         ``capacity_mwh`` applies symmetrically in both directions;
         ``forward_capacity_mwh`` limits flow from ``from_zone`` to
         ``to_zone`` and ``reverse_capacity_mwh`` the opposite direction.
         With ``period=None`` the value applies to every period without an
         explicit per-period override. Interconnectors without any NTC are
-        unconstrained.
+        unconstrained. The link must have been declared as a
+        ``(from_zone, to_zone)`` pair in ``PowerMarket(interconnectors=...)``.
         """
 
-        if self.system is None:
-            raise ValueError("set_ntc requires a market built from a System")
-        if not self.system.has_interconnector(from_zone, to_zone):
-            raise ValueError(
-                f"system has no interconnector between {from_zone!r} and {to_zone!r}"
-            )
         if capacity_mwh is not None:
             if forward_capacity_mwh is not None or reverse_capacity_mwh is not None:
                 raise ValueError(
@@ -334,8 +331,13 @@ class Market:
             raise ValueError("set_ntc requires a capacity")
 
         pair = (from_zone, to_zone)
-        if pair not in self.system.interconnectors:
+        if pair not in self._interconnector_pairs:
             pair = (to_zone, from_zone)
+            if pair not in self._interconnector_pairs:
+                raise ValueError(
+                    f"no interconnector between {from_zone!r} and {to_zone!r}; "
+                    "declare it via PowerMarket(interconnectors=[...])"
+                )
             forward_capacity_mwh, reverse_capacity_mwh = (
                 reverse_capacity_mwh,
                 forward_capacity_mwh,
@@ -351,12 +353,20 @@ class Market:
                 raise ValueError(f"{name} capacity must be non-negative")
         limits[period] = (min_flow, max_flow)
 
-    def _require_system_zone(self, zone: str) -> None:
-        if self.system is not None and zone not in self.system.zones:
-            raise ValueError(f"unknown zone {zone!r}; not part of the market's System")
+    def has_interconnector(self, from_zone: str, to_zone: str) -> bool:
+        """Whether ``(from_zone, to_zone)`` was declared as an interconnector."""
 
-    def _materialize_system_interconnectors(self, periods: Sequence[int]) -> None:
-        if self.system is None:
+        return (from_zone, to_zone) in self._interconnector_pairs or (
+            to_zone,
+            from_zone,
+        ) in self._interconnector_pairs
+
+    def _require_known_zone(self, zone: str) -> None:
+        if not self.zones.empty and zone not in set(self.zones["zone"]):
+            raise ValueError(f"unknown zone {zone!r}; declare it via PowerMarket(zones=...)")
+
+    def _materialize_interconnectors(self, periods: Sequence[int]) -> None:
+        if not self._interconnector_pairs:
             return
         existing: set[tuple[str, int]] = set()
         if not self.interconnectors.empty and {
@@ -367,7 +377,7 @@ class Market:
                 (str(row["id"]), int(row["period"]))
                 for _, row in self.interconnectors.iterrows()
             }
-        for from_zone, to_zone in self.system.interconnectors:
+        for from_zone, to_zone in self._interconnector_pairs:
             limits = self._ntc.get((from_zone, to_zone), {})
             link_id = f"{from_zone}-{to_zone}"
             for period in periods:
@@ -388,7 +398,7 @@ class Market:
                     },
                 )
 
-    def add_fixed_flow_boundary(
+    def add_flow_boundary(
         self,
         *,
         id: str,
@@ -397,7 +407,7 @@ class Market:
         quantity_mwh: float,
         external_zone: str | None = None,
     ) -> None:
-        """Add an exogenous boundary exchange.
+        """Add a boundary condition pinned at a fixed exchange volume.
 
         Positive ``quantity_mwh`` means net export from ``zone`` to the external
         system. Negative values mean net import into ``zone``.
@@ -414,7 +424,7 @@ class Market:
             },
         )
 
-    def add_fixed_price_boundary(
+    def add_price_boundary(
         self,
         *,
         id: str,
@@ -425,7 +435,7 @@ class Market:
         export_capacity_mwh: float,
         external_zone: str | None = None,
     ) -> None:
-        """Add a fixed-price external market proxy.
+        """Add a price-taking boundary condition.
 
         The solver chooses a signed boundary exchange. Positive values are
         exports from ``zone`` at ``price_eur_per_mwh``; negative values are
@@ -527,7 +537,7 @@ class Market:
         if not period_set:
             raise ValueError("market requires at least one period")
 
-        self._materialize_system_interconnectors(sorted(period_set))
+        self._materialize_interconnectors(sorted(period_set))
         self.interconnectors = _interconnectors_frame(self.interconnectors)
 
         _validate_ids(self.orders, "orders", "id")
@@ -609,6 +619,39 @@ class Market:
 
 def _copy_or_empty(value: pd.DataFrame | None) -> pd.DataFrame:
     return value.copy() if value is not None else pd.DataFrame()
+
+
+def _split_interconnectors(
+    value: pd.DataFrame | Sequence[tuple[str, str]] | None,
+    zones: pd.DataFrame,
+) -> tuple[pd.DataFrame, tuple[tuple[str, str], ...]]:
+    """Split the constructor's ``interconnectors`` into (table, topology).
+
+    A DataFrame (or ``None``) is the materialized per-period capacity
+    table. A sequence of ``(from_zone, to_zone)`` pairs instead declares
+    topology only, to be filled in later via :meth:`PowerMarket.set_ntc`.
+    """
+
+    if value is None or isinstance(value, pd.DataFrame):
+        return _copy_or_empty(value), ()
+    zone_set = set(zones["zone"]) if not zones.empty else None
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for pair in value:
+        from_zone, to_zone = (str(zone) for zone in pair)
+        if zone_set is not None and (from_zone not in zone_set or to_zone not in zone_set):
+            raise ValueError(
+                f"interconnector references unknown zone in {(from_zone, to_zone)}"
+            )
+        if from_zone == to_zone:
+            raise ValueError(f"interconnector cannot connect {from_zone!r} to itself")
+        if (from_zone, to_zone) in seen or (to_zone, from_zone) in seen:
+            raise ValueError(
+                f"interconnector between {from_zone!r} and {to_zone!r} already declared"
+            )
+        seen.add((from_zone, to_zone))
+        pairs.append((from_zone, to_zone))
+    return pd.DataFrame(), tuple(pairs)
 
 
 def _append_row(frame: pd.DataFrame, row: Mapping[str, Any]) -> pd.DataFrame:

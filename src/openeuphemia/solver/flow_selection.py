@@ -48,7 +48,7 @@ from typing import Any, Mapping
 
 import pandas as pd
 
-from openeuphemia.core import Market, MarketClearingResult
+from openeuphemia.core import PowerMarket, MarketClearingResult
 from openeuphemia.exceptions import InfeasibleMarketError
 from openeuphemia.solver.market import (
     _accepted_order_results,
@@ -67,7 +67,7 @@ DEFAULT_VOLUME_TOLERANCE_MWH = 1e-3
 
 
 def clear_market_with_flow_selection(
-    market: Market,
+    market: PowerMarket,
     *,
     method: str = "pro-rata",
     anchor_flows: Mapping[tuple[str, int], float] | None = None,
@@ -129,7 +129,7 @@ def clear_market_with_flow_selection(
 
 
 def _solve_period(
-    period_market: Market,
+    period_market: PowerMarket,
     *,
     method: str,
     anchor_flows: Mapping[tuple[str, int], float],
@@ -191,7 +191,7 @@ def _solve_period(
 
 def _minimize_pro_rata_deviation(
     model: Any,
-    period_market: Market,
+    period_market: PowerMarket,
     stage_one_prices: pd.DataFrame,
 ) -> None:
     """Equalize acceptance ratios within each (side, price, cluster) group."""
@@ -225,7 +225,7 @@ def _minimize_pro_rata_deviation(
 
 def _face_range_clusters(
     model: Any,
-    period_market: Market,
+    period_market: PowerMarket,
     stage_one_prices: pd.DataFrame,
 ) -> dict[str, str]:
     """Zone -> cluster root, joining zones across genuinely open links.

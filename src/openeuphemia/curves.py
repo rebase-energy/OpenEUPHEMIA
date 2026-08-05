@@ -27,6 +27,14 @@ class BidCurve:
 
     Supply curves must have non-decreasing prices, demand curves
     non-increasing prices; cumulative volumes are non-decreasing for both.
+
+    The default way to build one is a list of ``(volume, price)`` pairs::
+
+        BidCurve([(100.0, 10.0), (200.0, 80.0)])
+
+    Passing ``prices`` and ``cumulative_volumes`` as two separate sequences
+    is also supported, for callers that already have the curve in that
+    shape.
     """
 
     prices: tuple[float, ...]
@@ -34,10 +42,25 @@ class BidCurve:
 
     def __init__(
         self,
+        volume_price_pairs: Sequence[tuple[float, float]] | None = None,
         *,
-        prices: Sequence[float],
-        cumulative_volumes: Sequence[float],
+        prices: Sequence[float] | None = None,
+        cumulative_volumes: Sequence[float] | None = None,
     ) -> None:
+        if volume_price_pairs is not None:
+            if prices is not None or cumulative_volumes is not None:
+                raise ValueError(
+                    "pass either volume_price_pairs or prices/cumulative_volumes, "
+                    "not both"
+                )
+            cumulative_volumes, prices = (
+                zip(*volume_price_pairs) if volume_price_pairs else ((), ())
+            )
+        elif prices is None or cumulative_volumes is None:
+            raise ValueError(
+                "BidCurve requires either volume_price_pairs or both prices and "
+                "cumulative_volumes"
+            )
         object.__setattr__(self, "prices", tuple(float(price) for price in prices))
         object.__setattr__(
             self,
@@ -126,7 +149,7 @@ class BidCurve:
         side: str,
         id_prefix: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Lower the curve to rows for the ``Market.orders`` component table."""
+        """Lower the curve to rows for the ``PowerMarket.orders`` component table."""
 
         prefix = id_prefix or f"{zone}_p{period}_{side}"
         return [
@@ -213,7 +236,7 @@ def bid_curves_from_table(
     ``price_eur_per_mwh``, and ``quantity_mwh``, one row per price step.
     The result maps ``(period, zone)`` to a ``{"supply": ..., "demand": ...}``
     mapping ready to pass straight to
-    :meth:`openeuphemia.core.Market.add_bid_curve`.
+    :meth:`openeuphemia.core.PowerMarket.add_bid_curve`.
     """
 
     required = {"period", "zone", "side", "price_eur_per_mwh", "quantity_mwh"}
