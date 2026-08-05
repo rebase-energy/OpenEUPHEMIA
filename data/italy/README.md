@@ -9,6 +9,7 @@ authentication required.
 |---|---|---|---|
 | `bid-curves.csv.gz` | `delivery_day, period, zone, side, price_eur_per_mwh, quantity_mwh` | MGP *Offerte pubbliche* | input |
 | `transfer-capacities.csv.gz` | `delivery_day, period, id, from_zone, to_zone, min_flow_mwh, max_flow_mwh` | MGP *Limiti di transito* | input |
+| `internal-transfer-capacities.csv.gz` | `delivery_day, period, from_zone, to_zone, forward_capacity_mwh, reverse_capacity_mwh` | derived (see below) | convenience view of `transfer-capacities`, ready for `set_ntc` |
 | `published-prices.csv.gz` | `delivery_day, period, zone, price_eur_per_mwh` | MGP *Prezzi* | border zones are input, Italian zones are the target |
 | `published-exchanges.csv.gz` | `delivery_day, period, zone, external_zone, exchange_mwh` | MGP *Transiti* | input for the `exchanges` boundary |
 | `published-flows.csv.gz` | `delivery_day, period, from_zone, to_zone, flow_mwh` | MGP *Transiti* | **target only** |
@@ -19,6 +20,17 @@ an input: it is what the flow validation is scored against.
 input under the `exchanges` boundary — the schedule with the rest of
 Europe, which Italy's clearing takes as given. Both are export-positive
 from the first-named zone.
+
+`internal-transfer-capacities` carries no information beyond
+`transfer-capacities` — it is the same six internal links, filtered to
+drop the twelve cross-border edges and re-expressed as one non-negative
+`forward_capacity_mwh`/`reverse_capacity_mwh` pair per link instead of a
+signed `min_flow_mwh`/`max_flow_mwh` range. That is exactly the shape
+`PowerMarket.set_ntc` takes, so it is committed as its own file rather
+than requiring every consumer to re-derive it with
+`openeuphemia.areas.italy.replication.internal_transfer_capacities`
+(which is what produced this file, and which `build_italy_market` still
+calls internally).
 
 ## How the inputs were derived
 
@@ -63,3 +75,27 @@ target and the cross-border edges the exchange input.
 | Month | Days | Zone-hours | Link-hours | Notes |
 |---|---|---|---|---|
 | `2025-04` | 30 | 5,040 | 4,320 | Hourly periods, 7 zones, 6 internal links, 12 external borders |
+
+## Regenerating a derived file
+
+`internal-transfer-capacities.csv.gz` is a pure transform of
+`transfer-capacities.csv.gz` already committed in this directory — no
+network access needed to rebuild it:
+
+```python
+import pandas as pd
+from openeuphemia.areas.italy import ITALY_PRICE_AREAS, delivery_days
+from openeuphemia.areas.italy.replication import internal_transfer_capacities
+
+transfer_capacities = pd.read_csv("transfer-capacities.csv.gz")
+frames = []
+for day in delivery_days(transfer_capacities):
+    frame = internal_transfer_capacities(
+        transfer_capacities, delivery_day=day, zones=ITALY_PRICE_AREAS
+    )
+    frame.insert(0, "delivery_day", day)
+    frames.append(frame)
+pd.concat(frames, ignore_index=True).to_csv(
+    "internal-transfer-capacities.csv.gz", index=False, compression="gzip"
+)
+```
