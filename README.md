@@ -1,18 +1,22 @@
 # OpenEUPHEMIA
 
-**An open-source replication of EUPHEMIA, the European day-ahead electricity market-clearing algorithm — validated against published market results.**
+**This project aims to be an open-source replication of EUPHEMIA, the European day-ahead electricity market-clearing algorithm — validated against published market results.**
 
 [EUPHEMIA](https://www.nemo-committee.eu/sdac) clears the Single Day-ahead Coupling (SDAC) spanning most of Europe: it maximizes economic welfare over all submitted orders subject to network constraints, and the resulting zonal prices settle billions of euros of energy every year. The algorithm is publicly described but its implementation is closed.
 
-OpenEUPHEMIA's aim is a complete, verifiable open-source implementation for the full SDAC region. The approach is incremental and evidence-driven: a market region is added only once its published outcomes can be **reproduced exactly**, so everything in this repository is proven to work.
+OpenEUPHEMIA's aim is a complete, verifiable open-source implementation for the full SDAC region. The approach is incremental and validation-driven: a market region is added only once its published outcomes can be **reproduced exactly**, so everything in this repository is proven to work.
 
 ## Validation cases
 
-| Case | Period | Target | Result | Run it |
+A market clearing publishes two outcomes: the **zonal prices** and the **flows** between zones. A case is validated against both.
+
+| Case | Period | Prices | Flows | Run it |
 |---|---|---|---|---|
-| **Italy** (GME MGP) | April 2025 | Zonal day-ahead prices | **5,040 / 5,040 zone-hours exact** — MAE 0.0000, max 0.000 EUR/MWh | [notebook](examples/italy_april_2025.ipynb) · [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/rebase-energy/OpenEUPHEMIA/blob/main/examples/italy_april_2025.ipynb) |
+| **Italy** (GME MGP) | April 2025 | ✅ **5,040 / 5,040 zone-hours exact** — MAE 0.0000 EUR/MWh | 🚧 not yet validated | [notebook](examples/italy_april_2025.ipynb) · [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/rebase-energy/OpenEUPHEMIA/blob/main/examples/italy_april_2025.ipynb) |
 
 Each case builds its market from published data only, clears it, and compares against the outcome the market operator published. Crucially, **no observed flows or tie-break rules are used**: scheduled exchanges are an *outcome* of the clearing, so feeding them back in would make the exercise circular.
+
+Prices come first because they are pinned down uniquely by welfare maximization. Flows are not: whenever two zones settle at the same price, the split of the exchange between them is genuinely indeterminate — many flow patterns support the identical, optimal welfare — so reproducing the published flows needs a further rule that is not in the public description. That is the next milestone, and until a case reproduces flows exactly its column stays marked 🚧.
 
 ## How a case works
 
@@ -87,7 +91,7 @@ This library is about **building, closing, and clearing markets** — not about 
 
 ## Roadmap
 
-- **Italy** — exact zonal price replication ✅. Next: cleared volumes and scheduled flows, which are harder because equal prices leave the flow split genuinely indeterminate.
+- **Italy** — prices replicated exactly ✅. Next: the flows, and with them the cleared volumes per zone.
 - **Nordics / MIBEL / CWE** — extend the same curve + boundary-condition methodology, region by region, each gated on exact replication of published outcomes.
 - **Full SDAC** — one coupled clearing of all regions, closing the boundary conditions internally.
 
