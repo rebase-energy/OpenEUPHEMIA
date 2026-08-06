@@ -3,21 +3,29 @@
 Read this before making changes. It applies to any AI coding assistant
 working in this repo — Claude Code, Codex, or otherwise.
 
-## README.md is human-owned
+## README.md is human-owned — write to README-agents.md instead
 
-`README.md` is written and maintained by hand. Do not rewrite,
-restructure, or regenerate it on your own initiative — including as a
-side effect of an unrelated code, data, or notebook change.
+`README.md` is written and maintained by hand. In Claude Code, a
+`PreToolUse` hook (`.claude/hooks/protect-readme.py`, registered in
+`.claude/settings.json`) enforces this mechanically: any `Edit`, `Write`,
+`MultiEdit`, or `NotebookEdit` call targeting `README.md` is blocked
+before it runs. Other tools (Codex, etc.) don't have that hook, so this
+file is the enforcement for them — follow it as a hard rule, not a
+suggestion.
 
-- If a change makes something in the README stale (a renamed function,
-  a changed number, a moved file), say so in your reply and leave the
-  file alone. Let the maintainer decide how and when to update it.
-- If the maintainer explicitly asks for a README change, make the
-  smallest edit that satisfies the request — a targeted edit, not a
-  full-file rewrite — and say what changed and why, so it's easy to
-  review and revert if needed.
-- Never do a wholesale rewrite of README.md, even when the code or
-  examples it documents change substantially.
+**If you need to propose a README change:** write it to
+`README-agents.md` instead — a diff, a rewritten section, or a note
+about what's gone stale and why. Create it if it doesn't exist. It's
+gitignored, so it's a scratch/review file, not documentation: the
+maintainer reads it, updates `README.md` by hand, and clears it out.
+
+- If a code, data, or notebook change makes something in the README
+  stale (a renamed function, a changed number, a moved file), say so in
+  your reply and put the fix in `README-agents.md`. Don't touch
+  `README.md` itself.
+- Never do a wholesale rewrite — of `README.md` directly (blocked
+  anyway) or of `README-agents.md` (defeats the point: the maintainer
+  needs to see what changed, not re-review a whole file each time).
 
 This exists because README.md was silently overwritten by agent-authored
 rewrites more than once, discarding hand-written edits. The README

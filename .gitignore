@@ -16,3 +16,6 @@ build/
 .DS_Store
 .vscode/
 .idea/
+
+# Agent scratch space — never a source of truth, never committed
+README-agents.md
