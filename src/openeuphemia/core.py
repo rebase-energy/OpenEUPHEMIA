@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Mapping
 
 import pandas as pd
@@ -130,10 +130,18 @@ class PowerMarket:
     against what you expect — an order in an undeclared zone is then an
     error rather than a silently new zone.
 
+    Delivery times can be given either as integer ``period`` ordinals or
+    as ``timestamp`` values — a string, :class:`datetime.datetime`, or
+    :class:`pandas.Timestamp`. Timestamps label the *start* of each
+    delivery interval and are the self-describing form: a row says when
+    it applies without needing an external convention. They are resolved
+    to period ordinals (1, 2, 3 … in chronological order) at
+    :meth:`validate` time, and carried back onto the cleared result.
+
     ``delivery_day`` is a label for the day being cleared, not part of the
     optimization. It is carried through to the result and defaults to
-    empty; periods are integer indices, so nothing else anchors them to a
-    calendar date.
+    empty; it is unnecessary when timestamps are used, since those anchor
+    themselves to a calendar date.
     """
 
     def __init__(
@@ -145,6 +153,7 @@ class PowerMarket:
         zones: pd.DataFrame | list[str] | tuple[str, ...] | None = None,
         interconnectors: pd.DataFrame | Sequence[tuple[str, str]] | None = None,
         periods: pd.DataFrame | list[int] | tuple[int, ...] | None = None,
+        timestamps: Sequence[Any] | None = None,
         orders: pd.DataFrame | None = None,
         block_orders: pd.DataFrame | None = None,
         complex_orders: pd.DataFrame | None = None,
@@ -161,7 +170,11 @@ class PowerMarket:
         self.name = name
         self.delivery_day = str(delivery_day)
         self.coupling = normalized_coupling
-        self._ntc: dict[tuple[str, str], dict[int | None, tuple[float, float]]] = {}
+        self._ntc: dict[tuple[str, str], dict[Any, tuple[float, float]]] = {}
+        self._declared_timestamps: tuple[pd.Timestamp, ...] = tuple(
+            _coerce_timestamp(value) for value in (timestamps or ())
+        )
+        self._timestamp_by_period: dict[int, pd.Timestamp] = {}
         self.zones = _zones_frame(zones)
         self.periods = _periods_frame(periods)
         self.orders = _copy_or_empty(orders)
@@ -231,21 +244,31 @@ class PowerMarket:
         self,
         *,
         zone: str,
-        period: int,
+        period: int | None = None,
+        timestamp: Any | None = None,
         supply: BidCurve | None = None,
         demand: BidCurve | None = None,
         name: str | None = None,
     ) -> None:
         """Add aggregated supply and/or demand bid curves for one zone and period.
 
+        Give the delivery interval as either an integer ``period`` or a
+        ``timestamp`` (string, ``datetime``, or ``pandas.Timestamp``)
+        marking the interval's start.
+
         Curves are lowered to simple orders in the ``orders`` component table.
-        Order ids derive from ``name`` (default ``{zone}_p{period}_{side}``)
+        Order ids derive from ``name`` (default ``{zone}_p{label}_{side}``)
         and are suffixed automatically if a curve with the same name was
         already added.
         """
 
         if supply is None and demand is None:
             raise ValueError("add_bid_curve requires a supply and/or demand curve")
+        stamp = self._delivery_interval(period, timestamp)
+        label = period if stamp is None else stamp.isoformat()
+        # Rows carry a placeholder period when indexed by timestamp; the real
+        # ordinal is assigned chronologically in validate().
+        slot = 0 if stamp is not None else int(period)
         self._require_known_zone(zone)
         existing_ids: set[str] = (
             set()
@@ -256,17 +279,20 @@ class PowerMarket:
         for side, curve in ((SUPPLY, supply), (DEMAND, demand)):
             if curve is None:
                 continue
-            base_prefix = f"{name}_{side}" if name else f"{zone}_p{period}_{side}"
+            base_prefix = f"{name}_{side}" if name else f"{zone}_p{label}_{side}"
             prefix = base_prefix
             attempt = 2
             while any(row["id"] in existing_ids for row in curve.to_orders(
-                zone=zone, period=period, side=side, id_prefix=prefix
+                zone=zone, period=slot, side=side, id_prefix=prefix
             )):
                 prefix = f"{base_prefix}_{attempt}"
                 attempt += 1
             side_rows = curve.to_orders(
-                zone=zone, period=period, side=side, id_prefix=prefix
+                zone=zone, period=slot, side=side, id_prefix=prefix
             )
+            if stamp is not None:
+                for row in side_rows:
+                    row["timestamp"] = stamp
             existing_ids.update(row["id"] for row in side_rows)
             rows.extend(side_rows)
         if rows:
@@ -283,31 +309,54 @@ class PowerMarket:
         id: str,
         zone: str,
         side: str,
-        periods: int | Sequence[int],
+        periods: int | Sequence[int] | None = None,
+        timestamps: Any | Sequence[Any] | None = None,
         quantity_mwh: float,
         price_eur_per_mwh: float,
     ) -> None:
-        """Add an all-or-nothing block order spanning one or more periods."""
+        """Add an all-or-nothing block order spanning one or more intervals.
+
+        Give the intervals as either integer ``periods`` or ``timestamps``.
+        """
 
         if side not in SIDES:
             raise ValueError(f"side must be one of {sorted(SIDES)}, got {side!r}")
+        if (periods is None) == (timestamps is None):
+            raise ValueError("pass exactly one of periods= or timestamps=")
         self._require_known_zone(zone)
-        period_list = [periods] if isinstance(periods, int) else list(periods)
-        if not period_list:
-            raise ValueError("block order requires at least one period")
-        for period in period_list:
-            self.block_orders = _append_row(
-                self.block_orders,
-                {
-                    "id": f"{id}_p{int(period)}",
-                    "block_id": id,
-                    "period": int(period),
-                    "zone": zone,
-                    "side": side,
-                    "quantity_mwh": quantity_mwh,
-                    "price_eur_per_mwh": price_eur_per_mwh,
-                },
+
+        if timestamps is not None:
+            values: list[Any] = (
+                [timestamps]
+                if isinstance(timestamps, str) or not isinstance(timestamps, Sequence)
+                else list(timestamps)
             )
+            stamps = [self._delivery_interval(None, value) for value in values]
+        else:
+            period_list = [periods] if isinstance(periods, int) else list(periods)
+            stamps = [None] * len(period_list)
+        if timestamps is not None:
+            labels: list[Any] = [stamp.isoformat() for stamp in stamps]
+            slots = [0] * len(stamps)
+        else:
+            labels = [int(value) for value in period_list]
+            slots = labels
+        if not labels:
+            raise ValueError("block order requires at least one delivery interval")
+
+        for label, slot, stamp in zip(labels, slots, stamps, strict=True):
+            row: dict[str, Any] = {
+                "id": f"{id}_p{label}",
+                "block_id": id,
+                "period": slot,
+                "zone": zone,
+                "side": side,
+                "quantity_mwh": quantity_mwh,
+                "price_eur_per_mwh": price_eur_per_mwh,
+            }
+            if stamp is not None:
+                row["timestamp"] = stamp
+            self.block_orders = _append_row(self.block_orders, row)
 
     def set_ntc(
         self,
@@ -318,18 +367,25 @@ class PowerMarket:
         forward_capacity_mwh: float | None = None,
         reverse_capacity_mwh: float | None = None,
         period: int | None = None,
+        timestamp: Any | None = None,
     ) -> None:
         """Set the net transfer capacity of a declared interconnector.
 
         ``capacity_mwh`` applies symmetrically in both directions;
         ``forward_capacity_mwh`` limits flow from ``from_zone`` to
         ``to_zone`` and ``reverse_capacity_mwh`` the opposite direction.
-        With ``period=None`` the value applies to every period without an
-        explicit per-period override. Interconnectors without any NTC are
+        Scope it to one interval with either ``period`` or ``timestamp``;
+        with neither, the value applies to every interval without an
+        explicit override. Interconnectors without any NTC are
         unconstrained. The link must have been declared as a
         ``(from_zone, to_zone)`` pair in ``PowerMarket(interconnectors=...)``.
         """
 
+        if period is not None and timestamp is not None:
+            raise ValueError("pass either period= or timestamp=, not both")
+        key: Any = period
+        if timestamp is not None:
+            key = self._delivery_interval(None, timestamp)
         if capacity_mwh is not None:
             if forward_capacity_mwh is not None or reverse_capacity_mwh is not None:
                 raise ValueError(
@@ -352,15 +408,13 @@ class PowerMarket:
                 forward_capacity_mwh,
             )
         limits = self._ntc.setdefault(pair, {})
-        previous_min, previous_max = limits.get(
-            period, (-float("inf"), float("inf"))
-        )
+        previous_min, previous_max = limits.get(key, (-float("inf"), float("inf")))
         max_flow = forward_capacity_mwh if forward_capacity_mwh is not None else previous_max
         min_flow = -reverse_capacity_mwh if reverse_capacity_mwh is not None else previous_min
         for name, value in (("forward", max_flow), ("reverse", -min_flow)):
             if value < 0:
                 raise ValueError(f"{name} capacity must be non-negative")
-        limits[period] = (min_flow, max_flow)
+        limits[key] = (min_flow, max_flow)
 
     def has_interconnector(self, from_zone: str, to_zone: str) -> bool:
         """Whether ``(from_zone, to_zone)`` was declared as an interconnector."""
@@ -374,6 +428,21 @@ class PowerMarket:
         if not self.zones.empty and zone not in set(self.zones["zone"]):
             raise ValueError(f"unknown zone {zone!r}; declare it via PowerMarket(zones=...)")
 
+    def _delivery_interval(
+        self, period: int | None, timestamp: Any | None
+    ) -> pd.Timestamp | None:
+        """Validate a period/timestamp pair; return the timestamp, if any."""
+
+        if (period is None) == (timestamp is None):
+            raise ValueError("pass exactly one of period= or timestamp=")
+        return None if timestamp is None else _coerce_timestamp(timestamp)
+
+    @property
+    def timestamps(self) -> dict[int, pd.Timestamp]:
+        """Period ordinal to interval start, once resolved by ``validate()``."""
+
+        return dict(self._timestamp_by_period)
+
     def _materialize_interconnectors(self, periods: Sequence[int]) -> None:
         if not self._interconnector_pairs:
             return
@@ -386,8 +455,14 @@ class PowerMarket:
                 (str(row["id"]), int(row["period"]))
                 for _, row in self.interconnectors.iterrows()
             }
+        period_of = {stamp: index for index, stamp in self._timestamp_by_period.items()}
         for from_zone, to_zone in self._interconnector_pairs:
-            limits = self._ntc.get((from_zone, to_zone), {})
+            raw = self._ntc.get((from_zone, to_zone), {})
+            # NTCs scoped by timestamp are rekeyed onto their resolved ordinal.
+            limits = {
+                (period_of.get(key, key) if isinstance(key, pd.Timestamp) else key): value
+                for key, value in raw.items()
+            }
             link_id = f"{from_zone}-{to_zone}"
             for period in periods:
                 if (link_id, int(period)) in existing:
@@ -411,7 +486,8 @@ class PowerMarket:
         self,
         *,
         id: str,
-        period: int,
+        period: int | None = None,
+        timestamp: Any | None = None,
         zone: str,
         quantity_mwh: float,
         external_zone: str | None = None,
@@ -422,22 +498,24 @@ class PowerMarket:
         system. Negative values mean net import into ``zone``.
         """
 
-        self.boundary_flows = _append_row(
-            self.boundary_flows,
-            {
-                "id": id,
-                "period": period,
-                "zone": zone,
-                "quantity_mwh": quantity_mwh,
-                "external_zone": external_zone,
-            },
-        )
+        stamp = self._delivery_interval(period, timestamp)
+        row: dict[str, Any] = {
+            "id": id,
+            "period": 0 if stamp is not None else period,
+            "zone": zone,
+            "quantity_mwh": quantity_mwh,
+            "external_zone": external_zone,
+        }
+        if stamp is not None:
+            row["timestamp"] = stamp
+        self.boundary_flows = _append_row(self.boundary_flows, row)
 
     def add_fixed_price_boundary(
         self,
         *,
         id: str,
-        period: int,
+        period: int | None = None,
+        timestamp: Any | None = None,
         zone: str,
         price_eur_per_mwh: float,
         import_capacity_mwh: float,
@@ -451,18 +529,19 @@ class PowerMarket:
         imports into ``zone`` at that price.
         """
 
-        self.boundary_prices = _append_row(
-            self.boundary_prices,
-            {
-                "id": id,
-                "period": period,
-                "zone": zone,
-                "price_eur_per_mwh": price_eur_per_mwh,
-                "import_capacity_mwh": import_capacity_mwh,
-                "export_capacity_mwh": export_capacity_mwh,
-                "external_zone": external_zone,
-            },
-        )
+        stamp = self._delivery_interval(period, timestamp)
+        row: dict[str, Any] = {
+            "id": id,
+            "period": 0 if stamp is not None else period,
+            "zone": zone,
+            "price_eur_per_mwh": price_eur_per_mwh,
+            "import_capacity_mwh": import_capacity_mwh,
+            "export_capacity_mwh": export_capacity_mwh,
+            "external_zone": external_zone,
+        }
+        if stamp is not None:
+            row["timestamp"] = stamp
+        self.boundary_prices = _append_row(self.boundary_prices, row)
 
     def clear(
         self,
@@ -501,7 +580,7 @@ class PowerMarket:
             flow_selection=flow_selection,
             anchor_flows=anchor_flows,
         )
-        return clear_market(
+        result = clear_market(
             self,
             solver=clearing_options.solver,
             method=clearing_options.method,
@@ -509,8 +588,85 @@ class PowerMarket:
             flow_selection=clearing_options.flow_selection,
             anchor_flows=clearing_options.anchor_flows,
         )
+        return self._with_timestamps(result)
+
+    def _with_timestamps(self, result: MarketClearingResult) -> MarketClearingResult:
+        """Label a cleared result with the timestamps its periods stand for."""
+
+        if not self._timestamp_by_period:
+            return result
+
+        def labelled(frame: pd.DataFrame) -> pd.DataFrame:
+            if frame.empty or "period" not in frame.columns:
+                return frame
+            out = frame.copy()
+            stamps = out["period"].map(self._timestamp_by_period)
+            out.insert(0, "timestamp", stamps)
+            return out
+
+        return replace(
+            result,
+            prices=labelled(result.prices),
+            flows=labelled(result.flows),
+            accepted_orders=labelled(result.accepted_orders),
+        )
+
+    def _resolve_timestamps(self) -> None:
+        """Assign period ordinals from timestamps, chronologically.
+
+        Rows added by timestamp carry a placeholder ordinal until this
+        runs. Resolution is one-shot: tables whose ordinals are already
+        assigned are left alone, so slicing a market into per-period
+        sub-markets never renumbers it.
+        """
+
+        tables = {
+            "orders": self.orders,
+            "block_orders": self.block_orders,
+            "interconnectors": self.interconnectors,
+            "boundary_flows": self.boundary_flows,
+            "boundary_prices": self.boundary_prices,
+        }
+
+        def unresolved(frame: pd.DataFrame) -> pd.Series | None:
+            if frame.empty or "period" not in frame.columns:
+                return None
+            ordinal = pd.to_numeric(frame["period"], errors="coerce")
+            pending = ordinal.isna() | (ordinal <= 0)
+            return pending if pending.any() else None
+
+        pending_tables = {
+            name: frame for name, frame in tables.items() if unresolved(frame) is not None
+        }
+        if not pending_tables:
+            return
+
+        stamps: set[pd.Timestamp] = set(self._declared_timestamps)
+        for frame in tables.values():
+            if not frame.empty and "timestamp" in frame.columns:
+                stamps.update(
+                    _coerce_timestamp(value) for value in frame["timestamp"].dropna()
+                )
+        if not stamps:
+            return
+
+        ordinals = _timestamp_ordinals(stamps)
+        self._timestamp_by_period = {index: stamp for stamp, index in ordinals.items()}
+
+        for name, frame in pending_tables.items():
+            if "timestamp" not in frame.columns or frame["timestamp"].isna().any():
+                raise ValueError(
+                    f"{name} has rows with neither a period nor a timestamp; index "
+                    "the whole market one way or the other, not a mix of both"
+                )
+            resolved = frame.copy()
+            resolved["period"] = [
+                ordinals[_coerce_timestamp(value)] for value in resolved["timestamp"]
+            ]
+            setattr(self, name, resolved)
 
     def validate(self) -> None:
+        self._resolve_timestamps()
         self.orders = _orders_frame(self.orders)
         self.block_orders = _block_orders_frame(self.block_orders)
         self.interconnectors = _interconnectors_frame(self.interconnectors)
@@ -628,6 +784,30 @@ class PowerMarket:
 
 def _copy_or_empty(value: pd.DataFrame | None) -> pd.DataFrame:
     return value.copy() if value is not None else pd.DataFrame()
+
+
+def _coerce_timestamp(value: Any) -> pd.Timestamp:
+    """Accept a string, ``datetime``, or ``pandas.Timestamp`` alike."""
+
+    try:
+        stamp = pd.Timestamp(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"could not read {value!r} as a timestamp") from exc
+    if stamp is pd.NaT:
+        raise ValueError(f"could not read {value!r} as a timestamp")
+    return stamp
+
+
+def _timestamp_ordinals(stamps: set[pd.Timestamp]) -> dict[pd.Timestamp, int]:
+    """Map timestamps to 1-based period ordinals in chronological order."""
+
+    aware = {stamp.tzinfo is not None for stamp in stamps}
+    if len(aware) > 1:
+        raise ValueError(
+            "cannot mix timezone-aware and timezone-naive timestamps; "
+            "give every delivery interval the same form"
+        )
+    return {stamp: index for index, stamp in enumerate(sorted(stamps), start=1)}
 
 
 def _split_interconnectors(

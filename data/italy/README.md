@@ -5,6 +5,9 @@ directory per month. Everything here is derived from public publications
 by [GME](https://www.mercatoelettrico.org) — free to download and use, no
 authentication required.
 
+All tables also carry a leading `timestamp` column (interval start,
+`Europe/Rome`); the columns below are those specific to each file.
+
 | File | Columns | Source | Role |
 |---|---|---|---|
 | `bid-curves.csv.gz` | `delivery_day, period, zone, side, price_eur_per_mwh, quantity_mwh` | MGP *Offerte pubbliche* | input |
@@ -22,6 +25,15 @@ an input: it is what the flow validation is scored against.
 input under the `exchanges` boundary — the schedule with the rest of
 Europe, which Italy's clearing takes as given. Both are export-positive
 from the first-named zone.
+
+Every table leads with a `timestamp` column giving the **start of the
+delivery interval**, timezone-aware in `Europe/Rome`. It is redundant
+with `delivery_day` + `period` and derived from them, but it makes each
+row self-describing and joins cleanly against anything else on a clock.
+The derivation walks the local hours of each day rather than assuming 24,
+so it stays correct on daylight-saving days (23 hours in spring, 25 in
+autumn) — April 2025 has no transition, but the conversion is not
+limited to days that don't.
 
 `internal-transfer-capacities` carries no information beyond
 `transfer-capacities` — it is the same six internal links, filtered to
