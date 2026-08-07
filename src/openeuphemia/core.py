@@ -123,13 +123,24 @@ class PowerMarket:
     table (a DataFrame with ``min_flow_mwh``/``max_flow_mwh`` columns) or a
     plain list of ``(from_zone, to_zone)`` pairs that declares the topology
     only, leaving the capacities to :meth:`set_ntc`.
+
+    ``periods`` and ``zones`` are optional: whatever the orders, blocks,
+    interconnectors, and boundary conditions refer to is inferred at
+    :meth:`validate` time. Declare them to have that inference checked
+    against what you expect — an order in an undeclared zone is then an
+    error rather than a silently new zone.
+
+    ``delivery_day`` is a label for the day being cleared, not part of the
+    optimization. It is carried through to the result and defaults to
+    empty; periods are integer indices, so nothing else anchors them to a
+    calendar date.
     """
 
     def __init__(
         self,
         *,
         name: str = "market",
-        delivery_day: str,
+        delivery_day: str = "",
         coupling: str | None = None,
         zones: pd.DataFrame | list[str] | tuple[str, ...] | None = None,
         interconnectors: pd.DataFrame | Sequence[tuple[str, str]] | None = None,
@@ -142,8 +153,6 @@ class PowerMarket:
         flow_based_constraints: pd.DataFrame | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> None:
-        if not delivery_day:
-            raise ValueError("delivery_day must be non-empty")
         normalized_coupling = (coupling or "ntc").lower()
         if normalized_coupling not in COUPLING_MODES:
             raise ValueError(

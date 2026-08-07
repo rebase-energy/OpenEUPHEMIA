@@ -63,6 +63,32 @@ def test_interconnector_pairs_reject_unknown_zones_and_self_loops():
         )
 
 
+def test_periods_are_inferred_from_the_data():
+    market = PowerMarket(zones=["A"])
+    for period in (1, 2, 3):
+        market.add_bid_curve(
+            zone="A", period=period,
+            supply=BidCurve([(100.0, 10.0 * period)]),
+            demand=BidCurve([(50.0, 4000.0)]),
+        )
+    market.validate()
+    assert market.periods["period"].tolist() == [1, 2, 3]
+
+
+def test_delivery_day_is_an_optional_label():
+    # It plays no part in the optimization; it is carried to the result.
+    market = PowerMarket(zones=["A"])
+    market.add_bid_curve(
+        zone="A", period=1,
+        supply=BidCurve([(100.0, 10.0)]), demand=BidCurve([(50.0, 4000.0)]),
+    )
+    assert market.delivery_day == ""
+    assert market.clear(method="per-period-lp").delivery_day == ""
+
+    labelled = PowerMarket(zones=["A"], delivery_day="2025-04-01")
+    assert labelled.delivery_day == "2025-04-01"
+
+
 def test_add_bid_curve_rejects_a_zone_outside_the_declared_zones():
     market = PowerMarket(name="m", delivery_day="2025-04-01", zones=["A"], periods=[1])
     with pytest.raises(ValueError, match="unknown zone"):
