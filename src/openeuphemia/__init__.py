@@ -8,6 +8,7 @@ day-ahead zonal prices exactly from public GME data alone.
 from __future__ import annotations
 
 from openeuphemia.core import (
+    ExternalZone,
     Interconnector,
     MarketClearingResult,
     PowerMarket,
@@ -19,6 +20,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "BidCurve",
+    "ExternalZone",
     "Interconnector",
     "MarketClearingResult",
     "PowerMarket",

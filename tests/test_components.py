@@ -5,7 +5,33 @@ import pickle
 
 import pytest
 
-from openeuphemia import BidCurve, Interconnector, PowerMarket, PriceZone
+from openeuphemia import (
+    BidCurve,
+    ExternalZone,
+    Interconnector,
+    PowerMarket,
+    PriceZone,
+)
+
+
+def two_zone_market_with_border():
+    """NORD/SUD internally, plus a border to the external zone FRAN."""
+    nord, sud, fran = PriceZone("NORD"), PriceZone("SUD"), ExternalZone("FRAN")
+    market = PowerMarket(
+        zones=[nord, sud],
+        interconnectors=[
+            Interconnector(nord, sud, capacity_mwh=500.0),
+            Interconnector(
+                nord, fran, import_capacity_mwh=1000.0, export_capacity_mwh=1000.0
+            ),
+        ],
+    )
+    market.add_bid_curve(
+        zone=nord, period=1,
+        supply=BidCurve([(100.0, 10.0), (200.0, 80.0)]),
+        demand=BidCurve([(40.0, 4000.0), (120.0, 30.0)]),
+    )
+    return market, nord, sud, fran
 
 
 def test_price_zone_is_interchangeable_with_its_name():
@@ -127,3 +153,117 @@ def test_plain_strings_and_tuples_still_work():
     market.set_ntc("A", "B", capacity_mwh=50.0)
     market.validate()
     assert market.interconnectors.iloc[0]["id"] == "A-B"
+
+
+def test_external_zone_is_still_its_name():
+    fran = ExternalZone("FRAN", country="FR")
+    assert fran == "FRAN"
+    assert isinstance(fran, PriceZone)
+    assert fran.country == "FR"
+    assert pickle.loads(pickle.dumps(fran)).country == "FR"
+    assert repr(fran) == "ExternalZone('FRAN', country='FR')"
+
+
+def test_a_border_does_not_become_an_internal_zone_or_link():
+    market, _nord, _sud, _fran = two_zone_market_with_border()
+    market.validate()
+    # FRAN is reached across a boundary, so it is neither a zone nor a link.
+    assert market.zones["zone"].tolist() == ["NORD", "SUD"]
+    assert market.interconnectors["id"].tolist() == ["NORD-SUD"]
+
+
+def test_boundary_takes_its_capacities_from_the_declared_border():
+    market, nord, _sud, fran = two_zone_market_with_border()
+    border = Interconnector(
+        nord, fran, import_capacity_mwh=1000.0, export_capacity_mwh=1000.0
+    )
+    market.add_fixed_price_boundary(
+        interconnector=border, period=1, price_eur_per_mwh=60.0
+    )
+    row = market.boundary_prices.iloc[0]
+    assert row["id"] == "NORD_FRAN"          # derived from the two zones
+    assert row["zone"] == "NORD"
+    assert row["external_zone"] == "FRAN"
+    assert (row["import_capacity_mwh"], row["export_capacity_mwh"]) == (1000.0, 1000.0)
+
+    prices = market.clear(method="per-period-lp").prices
+    assert prices.set_index("zone")["price_eur_per_mwh"].to_dict() == {
+        "NORD": 60.0, "SUD": 60.0
+    }
+
+
+def test_capacities_passed_to_the_call_override_the_declared_ones():
+    market, nord, _sud, fran = two_zone_market_with_border()
+    market.add_fixed_price_boundary(
+        interconnector=Interconnector(nord, fran, capacity_mwh=1000.0),
+        period=1,
+        price_eur_per_mwh=60.0,
+        export_capacity_mwh=25.0,      # this interval only
+    )
+    row = market.boundary_prices.iloc[0]
+    assert (row["import_capacity_mwh"], row["export_capacity_mwh"]) == (1000.0, 25.0)
+
+
+def test_boundary_capacities_follow_the_internal_zone_whichever_way_declared():
+    nord, fran = PriceZone("NORD"), ExternalZone("FRAN")
+    # forward/reverse are relative to from_zone, so the mapping must flip
+    # when the external zone is declared first.
+    outward = Interconnector(nord, fran, forward_capacity_mwh=300.0, reverse_capacity_mwh=100.0)
+    inward = Interconnector(fran, nord, forward_capacity_mwh=100.0, reverse_capacity_mwh=300.0)
+    assert outward.boundary_capacities() == (100.0, 300.0)   # (import, export)
+    assert inward.boundary_capacities() == (100.0, 300.0)
+    assert outward.internal_zone == inward.internal_zone == "NORD"
+    assert outward.external_zone == inward.external_zone == "FRAN"
+
+
+def test_fixed_flow_boundary_also_accepts_a_declared_border():
+    market, nord, _sud, fran = two_zone_market_with_border()
+    market.add_fixed_flow_boundary(
+        interconnector=Interconnector(nord, fran), period=1, quantity_mwh=42.0
+    )
+    row = market.boundary_flows.iloc[0]
+    assert row["id"] == "NORD_FRAN"
+    assert row["quantity_mwh"] == 42.0
+
+
+def test_external_zones_cannot_carry_orders_or_stand_in_for_the_modelled_side():
+    market, _nord, _sud, fran = two_zone_market_with_border()
+    with pytest.raises(ValueError, match="outside the modelled area"):
+        market.add_bid_curve(zone=fran, period=1, supply=BidCurve([(1.0, 1.0)]))
+    with pytest.raises(ValueError, match="must be the modelled side"):
+        market.add_fixed_price_boundary(
+            zone=fran, external_zone="NORD", period=1, price_eur_per_mwh=1.0,
+            import_capacity_mwh=1.0, export_capacity_mwh=1.0,
+        )
+
+
+def test_an_internal_link_is_rejected_as_a_boundary():
+    market, nord, sud, _fran = two_zone_market_with_border()
+    with pytest.raises(ValueError, match="no ExternalZone endpoint"):
+        market.add_fixed_price_boundary(
+            interconnector=Interconnector(nord, sud), period=1, price_eur_per_mwh=1.0
+        )
+
+
+def test_import_export_capacities_require_a_border():
+    with pytest.raises(ValueError, match="describe a border"):
+        Interconnector("A", "B", import_capacity_mwh=1.0)
+    with pytest.raises(ValueError, match="not both"):
+        Interconnector(
+            "A", ExternalZone("X"), forward_capacity_mwh=1.0, import_capacity_mwh=1.0
+        )
+
+
+def test_explicit_zone_and_external_zone_still_work_without_declared_borders():
+    # The dataframe-driven path builds boundaries per interval with their own
+    # capacities and never declares an Interconnector.
+    market = PowerMarket(zones=["A"])
+    market.add_bid_curve(
+        zone="A", period=1,
+        supply=BidCurve([(100.0, 10.0)]), demand=BidCurve([(50.0, 4000.0)]),
+    )
+    market.add_fixed_price_boundary(
+        id="A_X", period=1, zone="A", external_zone="X",
+        price_eur_per_mwh=30.0, import_capacity_mwh=500.0, export_capacity_mwh=500.0,
+    )
+    assert market.clear(method="per-period-lp").prices["price_eur_per_mwh"].tolist() == [30.0]

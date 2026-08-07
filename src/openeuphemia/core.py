@@ -95,6 +95,28 @@ def _rebuild_price_zone(name: str, attributes: dict[str, Any]) -> PriceZone:
     return PriceZone(name, **attributes)
 
 
+class ExternalZone(PriceZone):
+    """A zone outside the modelled area, reached across a boundary.
+
+    Behaves as a :class:`PriceZone` in every respect — it is still the
+    zone's name — but marks the zone as one this market does not clear.
+    A link with an external endpoint becomes a boundary condition rather
+    than an interconnector, external zones get no balance constraint, and
+    submitting orders in one is an error.
+    """
+
+    def __repr__(self) -> str:
+        extra = "".join(f", {key}={value!r}" for key, value in self.__dict__.items())
+        return f"ExternalZone({str.__repr__(self)}{extra})"
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (_rebuild_external_zone, (str(self), dict(self.__dict__)))
+
+
+def _rebuild_external_zone(name: str, attributes: dict[str, Any]) -> ExternalZone:
+    return ExternalZone(name, **attributes)
+
+
 @dataclass(frozen=True)
 class Interconnector:
     """A link between two zones, optionally carrying its transfer capacity.
@@ -102,6 +124,12 @@ class Interconnector:
     Declaring a capacity here is equivalent to calling
     :meth:`PowerMarket.set_ntc` for every interval; ``set_ntc`` remains
     the way to override a single one.
+
+    A link with an :class:`ExternalZone` endpoint is a **border**: it
+    becomes a boundary condition rather than an interconnector, and its
+    capacity is stated as ``import_capacity_mwh`` / ``export_capacity_mwh``
+    seen from the internal zone. The generic ``forward``/``reverse`` names
+    mean from/to ``from_zone`` and work for either sort of link.
 
     ``kind`` records whether the link is AC or HVDC. It is descriptive
     today — an NTC network is a capacity box either way — and starts to
@@ -113,18 +141,32 @@ class Interconnector:
     capacity_mwh: float | None = None
     forward_capacity_mwh: float | None = None
     reverse_capacity_mwh: float | None = None
+    import_capacity_mwh: float | None = None
+    export_capacity_mwh: float | None = None
     kind: str = "ac"
     name: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind.lower() not in {"ac", "hvdc"}:
             raise ValueError(f"kind must be 'ac' or 'hvdc', got {self.kind!r}")
-        if self.capacity_mwh is not None and (
-            self.forward_capacity_mwh is not None
-            or self.reverse_capacity_mwh is not None
+        directional = (self.forward_capacity_mwh, self.reverse_capacity_mwh)
+        border_wise = (self.import_capacity_mwh, self.export_capacity_mwh)
+        if self.capacity_mwh is not None and any(
+            value is not None for value in directional + border_wise
         ):
             raise ValueError(
                 "pass either capacity_mwh or directional capacities, not both"
+            )
+        if any(value is not None for value in directional) and any(
+            value is not None for value in border_wise
+        ):
+            raise ValueError(
+                "pass either forward/reverse or import/export capacities, not both"
+            )
+        if any(value is not None for value in border_wise) and not self.is_border:
+            raise ValueError(
+                "import/export capacities describe a border; declare one endpoint "
+                "as an ExternalZone, or use forward/reverse capacities"
             )
 
     def __iter__(self):
@@ -134,6 +176,30 @@ class Interconnector:
         yield self.to_zone
 
     @property
+    def is_border(self) -> bool:
+        """Whether one endpoint lies outside the modelled area."""
+
+        return isinstance(self.from_zone, ExternalZone) or isinstance(
+            self.to_zone, ExternalZone
+        )
+
+    @property
+    def internal_zone(self) -> str:
+        """The modelled endpoint of a border."""
+
+        if not self.is_border:
+            raise ValueError(f"{self!r} is not a border")
+        return self.to_zone if isinstance(self.from_zone, ExternalZone) else self.from_zone
+
+    @property
+    def external_zone(self) -> str:
+        """The un-modelled endpoint of a border."""
+
+        if not self.is_border:
+            raise ValueError(f"{self!r} is not a border")
+        return self.from_zone if isinstance(self.from_zone, ExternalZone) else self.to_zone
+
+    @property
     def has_capacity(self) -> bool:
         return any(
             value is not None
@@ -141,8 +207,22 @@ class Interconnector:
                 self.capacity_mwh,
                 self.forward_capacity_mwh,
                 self.reverse_capacity_mwh,
+                self.import_capacity_mwh,
+                self.export_capacity_mwh,
             )
         )
+
+    def boundary_capacities(self) -> tuple[float | None, float | None]:
+        """``(import, export)`` capacity seen from the internal zone."""
+
+        if self.capacity_mwh is not None:
+            return self.capacity_mwh, self.capacity_mwh
+        if self.import_capacity_mwh is not None or self.export_capacity_mwh is not None:
+            return self.import_capacity_mwh, self.export_capacity_mwh
+        # forward/reverse are relative to from_zone; flip when it is the external side.
+        if isinstance(self.from_zone, ExternalZone):
+            return self.forward_capacity_mwh, self.reverse_capacity_mwh
+        return self.reverse_capacity_mwh, self.forward_capacity_mwh
 
 
 @dataclass(frozen=True)
@@ -276,7 +356,12 @@ class PowerMarket:
             self.interconnectors,
             self._interconnector_pairs,
             declared_links,
+            declared_borders,
         ) = _split_interconnectors(interconnectors, self.zones)
+        self._borders: dict[tuple[str, str], Interconnector] = {
+            (border.internal_zone, border.external_zone): border
+            for border in declared_borders
+        }
         self._link_names: dict[tuple[str, str], str] = {
             (link.from_zone, link.to_zone): link.name
             for link in declared_links
@@ -534,6 +619,11 @@ class PowerMarket:
         ) in self._interconnector_pairs
 
     def _require_known_zone(self, zone: str) -> None:
+        if isinstance(zone, ExternalZone):
+            raise ValueError(
+                f"{zone!r} is outside the modelled area, so it has no orders; "
+                "reach it with a boundary condition instead"
+            )
         if not self.zones.empty and zone not in set(self.zones["zone"]):
             raise ValueError(f"unknown zone {zone!r}; declare it via PowerMarket(zones=...)")
 
@@ -591,25 +681,74 @@ class PowerMarket:
                     },
                 )
 
+    def _resolve_border(
+        self,
+        interconnector: Interconnector | None,
+        zone: str | None,
+        external_zone: str | None,
+        id: str | None,
+    ) -> tuple[str, str, str, Interconnector | None]:
+        """Work out (zone, external_zone, id, declared border) for a boundary."""
+
+        if interconnector is not None:
+            if not interconnector.is_border:
+                raise ValueError(
+                    f"{interconnector!r} has no ExternalZone endpoint, so it is an "
+                    "interconnector rather than a boundary"
+                )
+            if zone is not None or external_zone is not None:
+                raise ValueError(
+                    "pass either interconnector= or zone=/external_zone=, not both"
+                )
+            border = interconnector
+            zone, external_zone = border.internal_zone, border.external_zone
+        else:
+            if zone is None:
+                raise ValueError("a boundary needs zone= (or interconnector=)")
+            if isinstance(zone, ExternalZone):
+                raise ValueError(
+                    f"{zone!r} is external; zone= must be the modelled side"
+                )
+            border = self._borders.get((zone, external_zone))
+        # external_zone stays optional: an unnamed counterparty is fine as long
+        # as the boundary can still be identified, which then needs an id.
+        resolved_id = id or (border.name if border is not None and border.name else None)
+        if resolved_id is None:
+            if external_zone is None:
+                raise ValueError(
+                    "a boundary needs an id, or an external_zone to derive one from"
+                )
+            resolved_id = f"{zone}_{external_zone}"
+        return zone, external_zone, resolved_id, border
+
     def add_fixed_flow_boundary(
         self,
         *,
-        id: str,
+        id: str | None = None,
         period: int | None = None,
         timestamp: Any | None = None,
-        zone: str,
+        interconnector: Interconnector | None = None,
+        zone: str | None = None,
         quantity_mwh: float,
         external_zone: str | None = None,
     ) -> None:
         """Add a boundary condition pinned at a fixed exchange volume.
 
+        Identify the border either with a declared ``interconnector`` whose
+        far endpoint is an :class:`ExternalZone`, or with an explicit
+        ``zone``/``external_zone`` pair. ``id`` defaults to
+        ``{zone}_{external_zone}``.
+
         Positive ``quantity_mwh`` means net export from ``zone`` to the external
         system. Negative values mean net import into ``zone``.
         """
 
+        zone, external_zone, resolved_id, _ = self._resolve_border(
+            interconnector, zone, external_zone, id
+        )
         stamp = self._delivery_interval(period, timestamp)
         row: dict[str, Any] = {
-            "id": id,
+            "id": resolved_id,
             "period": 0 if stamp is not None else period,
             "zone": zone,
             "quantity_mwh": quantity_mwh,
@@ -622,25 +761,48 @@ class PowerMarket:
     def add_fixed_price_boundary(
         self,
         *,
-        id: str,
+        id: str | None = None,
         period: int | None = None,
         timestamp: Any | None = None,
-        zone: str,
+        interconnector: Interconnector | None = None,
+        zone: str | None = None,
         price_eur_per_mwh: float,
-        import_capacity_mwh: float,
-        export_capacity_mwh: float,
+        import_capacity_mwh: float | None = None,
+        export_capacity_mwh: float | None = None,
         external_zone: str | None = None,
     ) -> None:
         """Add a price-taking boundary condition.
+
+        Identify the border either with a declared ``interconnector`` whose
+        far endpoint is an :class:`ExternalZone` — in which case its
+        capacities are used — or with an explicit ``zone``/``external_zone``
+        pair and capacities. Capacities passed here override declared ones,
+        which is how a border whose limits move interval by interval is
+        expressed. ``id`` defaults to ``{zone}_{external_zone}``.
 
         The solver chooses a signed boundary exchange. Positive values are
         exports from ``zone`` at ``price_eur_per_mwh``; negative values are
         imports into ``zone`` at that price.
         """
 
+        zone, external_zone, resolved_id, border = self._resolve_border(
+            interconnector, zone, external_zone, id
+        )
+        if import_capacity_mwh is None or export_capacity_mwh is None:
+            declared = border.boundary_capacities() if border is not None else (None, None)
+            if import_capacity_mwh is None:
+                import_capacity_mwh = declared[0]
+            if export_capacity_mwh is None:
+                export_capacity_mwh = declared[1]
+        if import_capacity_mwh is None or export_capacity_mwh is None:
+            raise ValueError(
+                f"boundary {resolved_id!r} needs import and export capacities, either "
+                "declared on the Interconnector or passed here"
+            )
+
         stamp = self._delivery_interval(period, timestamp)
         row: dict[str, Any] = {
-            "id": id,
+            "id": resolved_id,
             "period": 0 if stamp is not None else period,
             "zone": zone,
             "price_eur_per_mwh": price_eur_per_mwh,
@@ -932,18 +1094,15 @@ def _split_interconnectors(
     """
 
     if value is None or isinstance(value, pd.DataFrame):
-        return _copy_or_empty(value), (), ()
+        return _copy_or_empty(value), (), (), ()
     zone_set = set(zones["zone"]) if not zones.empty else None
     pairs: list[tuple[str, str]] = []
     declared: list[Interconnector] = []
+    borders: list[Interconnector] = []
     seen: set[tuple[str, str]] = set()
     for entry in value:
         # PriceZone identity is preserved rather than coerced to plain str.
         from_zone, to_zone = tuple(entry)
-        if zone_set is not None and (from_zone not in zone_set or to_zone not in zone_set):
-            raise ValueError(
-                f"interconnector references unknown zone in {(from_zone, to_zone)}"
-            )
         if from_zone == to_zone:
             raise ValueError(f"interconnector cannot connect {from_zone!r} to itself")
         if (from_zone, to_zone) in seen or (to_zone, from_zone) in seen:
@@ -951,10 +1110,26 @@ def _split_interconnectors(
                 f"interconnector between {from_zone!r} and {to_zone!r} already declared"
             )
         seen.add((from_zone, to_zone))
+
+        # A link to an ExternalZone is a boundary, not an internal link: it
+        # carries no flow variable between modelled zones, and its external
+        # endpoint must not become a zone of the market.
+        if isinstance(entry, Interconnector) and entry.is_border:
+            if zone_set is not None and entry.internal_zone not in zone_set:
+                raise ValueError(
+                    f"border references unknown internal zone {entry.internal_zone!r}"
+                )
+            borders.append(entry)
+            continue
+
+        if zone_set is not None and (from_zone not in zone_set or to_zone not in zone_set):
+            raise ValueError(
+                f"interconnector references unknown zone in {(from_zone, to_zone)}"
+            )
         pairs.append((from_zone, to_zone))
         if isinstance(entry, Interconnector):
             declared.append(entry)
-    return pd.DataFrame(), tuple(pairs), tuple(declared)
+    return pd.DataFrame(), tuple(pairs), tuple(declared), tuple(borders)
 
 
 def _append_row(frame: pd.DataFrame, row: Mapping[str, Any]) -> pd.DataFrame:
