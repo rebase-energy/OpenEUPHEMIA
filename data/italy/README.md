@@ -8,6 +8,8 @@ authentication required.
 | File | Columns | Source | Role |
 |---|---|---|---|
 | `bid-curves.csv.gz` | `delivery_day, period, zone, side, price_eur_per_mwh, quantity_mwh` | MGP *Offerte pubbliche* | input |
+| `simple-bid-curves.csv.gz` | same as `bid-curves` | MGP *Offerte pubbliche* | input, blocks **excluded** (see below) |
+| `block-orders.csv.gz` | `delivery_day, block_id, period, zone, side, quantity_mwh, price_eur_per_mwh, published_status` | MGP *Offerte pubbliche* | input; `published_status` is **target only** |
 | `transfer-capacities.csv.gz` | `delivery_day, period, id, from_zone, to_zone, min_flow_mwh, max_flow_mwh` | MGP *Limiti di transito* | input |
 | `internal-transfer-capacities.csv.gz` | `delivery_day, period, from_zone, to_zone, forward_capacity_mwh, reverse_capacity_mwh` | derived (see below) | convenience view of `transfer-capacities`, ready for `set_ntc` |
 | `published-prices.csv.gz` | `delivery_day, period, zone, price_eur_per_mwh` | MGP *Prezzi* | border zones are input, Italian zones are the target |
@@ -54,6 +56,18 @@ price decomposition, their published decisions are fixed — accepted
 blocks enter the curves as price-taking volumes at their awarded
 quantity (supply below the floor, demand at the cap), rejected blocks are
 dropped — and prices come from clearing the remaining convex market.
+That is what `bid-curves.csv.gz` contains.
+
+**Blocks left to the solver.** `simple-bid-curves.csv.gz` and
+`block-orders.csv.gz` are the same order book split the other way, for
+runs that decide block acceptance rather than replaying it: the curves
+hold the simple hourly offers only, and each block is kept intact as its
+own set of legs sharing a `block_id`, with one limit price and one
+per-hour volume. `published_status` (`ACC` / `REJ` / `PREJ`) records what
+GME decided and is used **only for scoring** — never fed to the solver.
+A block is identified by its submitting unit and transaction reference;
+withdrawn/superseded submissions (`REP`) are excluded, as they carry no
+decision. See [`../../docs/block-orders.md`](../../docs/block-orders.md).
 
 **Transfer capacities.** *Limiti di transito* publishes a directional
 limit per edge and period. Paired directions become one row with
