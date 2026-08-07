@@ -53,6 +53,98 @@ BOUNDARY_PRICE_COLUMNS = (
 )
 
 
+class PriceZone(str):
+    """A bidding zone, usable anywhere its name is.
+
+    ``PriceZone`` subclasses :class:`str`, so it compares and hashes
+    exactly like the plain zone name and can be passed to any argument or
+    stored in any table that takes one. The difference is that it can
+    carry attributes::
+
+        NORD = PriceZone("NORD", country="IT", tso="Terna")
+        NORD == "NORD"      # True
+        NORD.country        # "IT"
+
+    Attributes are descriptive: the clearing uses only the name. They
+    exist so that per-zone properties EUPHEMIA defines but this library
+    does not yet model — notably a bidding area's minimum and maximum
+    price — have somewhere to live.
+    """
+
+    def __new__(cls, name: str, **attributes: Any) -> PriceZone:
+        zone = super().__new__(cls, str(name))
+        zone.__dict__.update(attributes)
+        return zone
+
+    @property
+    def attributes(self) -> dict[str, Any]:
+        """The descriptive attributes attached to this zone."""
+
+        return dict(self.__dict__)
+
+    def __repr__(self) -> str:
+        extra = "".join(f", {key}={value!r}" for key, value in self.__dict__.items())
+        return f"PriceZone({str.__repr__(self)}{extra})"
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        # Keep attributes across copy/pickle, which plain str.__reduce__ drops.
+        return (_rebuild_price_zone, (str(self), dict(self.__dict__)))
+
+
+def _rebuild_price_zone(name: str, attributes: dict[str, Any]) -> PriceZone:
+    return PriceZone(name, **attributes)
+
+
+@dataclass(frozen=True)
+class Interconnector:
+    """A link between two zones, optionally carrying its transfer capacity.
+
+    Declaring a capacity here is equivalent to calling
+    :meth:`PowerMarket.set_ntc` for every interval; ``set_ntc`` remains
+    the way to override a single one.
+
+    ``kind`` records whether the link is AC or HVDC. It is descriptive
+    today — an NTC network is a capacity box either way — and starts to
+    matter only once losses or ramping limits are modelled.
+    """
+
+    from_zone: str
+    to_zone: str
+    capacity_mwh: float | None = None
+    forward_capacity_mwh: float | None = None
+    reverse_capacity_mwh: float | None = None
+    kind: str = "ac"
+    name: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind.lower() not in {"ac", "hvdc"}:
+            raise ValueError(f"kind must be 'ac' or 'hvdc', got {self.kind!r}")
+        if self.capacity_mwh is not None and (
+            self.forward_capacity_mwh is not None
+            or self.reverse_capacity_mwh is not None
+        ):
+            raise ValueError(
+                "pass either capacity_mwh or directional capacities, not both"
+            )
+
+    def __iter__(self):
+        """Unpack as ``(from_zone, to_zone)``, like the plain tuple form."""
+
+        yield self.from_zone
+        yield self.to_zone
+
+    @property
+    def has_capacity(self) -> bool:
+        return any(
+            value is not None
+            for value in (
+                self.capacity_mwh,
+                self.forward_capacity_mwh,
+                self.reverse_capacity_mwh,
+            )
+        )
+
+
 @dataclass(frozen=True)
 class ClearingOptions:
     """Options for clearing a component-table market."""
@@ -180,9 +272,26 @@ class PowerMarket:
         self.orders = _copy_or_empty(orders)
         self.block_orders = _copy_or_empty(block_orders)
         self.complex_orders = _copy_or_empty(complex_orders)
-        self.interconnectors, self._interconnector_pairs = _split_interconnectors(
-            interconnectors, self.zones
-        )
+        (
+            self.interconnectors,
+            self._interconnector_pairs,
+            declared_links,
+        ) = _split_interconnectors(interconnectors, self.zones)
+        self._link_names: dict[tuple[str, str], str] = {
+            (link.from_zone, link.to_zone): link.name
+            for link in declared_links
+            if link.name
+        }
+        for link in declared_links:
+            if not link.has_capacity:
+                continue
+            self.set_ntc(
+                link.from_zone,
+                link.to_zone,
+                capacity_mwh=link.capacity_mwh,
+                forward_capacity_mwh=link.forward_capacity_mwh,
+                reverse_capacity_mwh=link.reverse_capacity_mwh,
+            )
         self.boundary_flows = _copy_or_empty(boundary_flows)
         self.boundary_prices = _copy_or_empty(boundary_prices)
         self.flow_based_constraints = _copy_or_empty(flow_based_constraints)
@@ -463,7 +572,7 @@ class PowerMarket:
                 (period_of.get(key, key) if isinstance(key, pd.Timestamp) else key): value
                 for key, value in raw.items()
             }
-            link_id = f"{from_zone}-{to_zone}"
+            link_id = self._link_names.get((from_zone, to_zone), f"{from_zone}-{to_zone}")
             for period in periods:
                 if (link_id, int(period)) in existing:
                     continue
@@ -811,23 +920,26 @@ def _timestamp_ordinals(stamps: set[pd.Timestamp]) -> dict[pd.Timestamp, int]:
 
 
 def _split_interconnectors(
-    value: pd.DataFrame | Sequence[tuple[str, str]] | None,
+    value: pd.DataFrame | Sequence[tuple[str, str] | Interconnector] | None,
     zones: pd.DataFrame,
-) -> tuple[pd.DataFrame, tuple[tuple[str, str], ...]]:
-    """Split the constructor's ``interconnectors`` into (table, topology).
+) -> tuple[pd.DataFrame, tuple[tuple[str, str], ...], tuple[Interconnector, ...]]:
+    """Split the constructor's ``interconnectors`` into (table, topology, declared).
 
     A DataFrame (or ``None``) is the materialized per-period capacity
-    table. A sequence of ``(from_zone, to_zone)`` pairs instead declares
-    topology only, to be filled in later via :meth:`PowerMarket.set_ntc`.
+    table. A sequence instead declares topology only — as plain
+    ``(from_zone, to_zone)`` pairs, or as :class:`Interconnector` objects,
+    which may additionally carry the link's capacity.
     """
 
     if value is None or isinstance(value, pd.DataFrame):
-        return _copy_or_empty(value), ()
+        return _copy_or_empty(value), (), ()
     zone_set = set(zones["zone"]) if not zones.empty else None
     pairs: list[tuple[str, str]] = []
+    declared: list[Interconnector] = []
     seen: set[tuple[str, str]] = set()
-    for pair in value:
-        from_zone, to_zone = (str(zone) for zone in pair)
+    for entry in value:
+        # PriceZone identity is preserved rather than coerced to plain str.
+        from_zone, to_zone = tuple(entry)
         if zone_set is not None and (from_zone not in zone_set or to_zone not in zone_set):
             raise ValueError(
                 f"interconnector references unknown zone in {(from_zone, to_zone)}"
@@ -840,7 +952,9 @@ def _split_interconnectors(
             )
         seen.add((from_zone, to_zone))
         pairs.append((from_zone, to_zone))
-    return pd.DataFrame(), tuple(pairs)
+        if isinstance(entry, Interconnector):
+            declared.append(entry)
+    return pd.DataFrame(), tuple(pairs), tuple(declared)
 
 
 def _append_row(frame: pd.DataFrame, row: Mapping[str, Any]) -> pd.DataFrame:
